@@ -58,21 +58,35 @@ public class UserWhitelistController : ControllerBase
         var currentUserId = GetCurrentUserId();
         var currentRole = GetCurrentRole();
 
-        if (currentUserId == id)
-            return Forbid();
+        var isSelf = currentUserId.HasValue && currentUserId.Value == id;
 
-        if (existing.Role == UserRole.SuperAdmin && entry.Role != UserRole.SuperAdmin)
-            return Forbid();
+        if (isSelf)
+        {
+            /* Адмін може змінити власний номер і активність; роль лише SuperAdmin (зміна ролі — через передачу прав). */
+            if (currentRole != UserRole.SuperAdmin || existing.Role != UserRole.SuperAdmin)
+                return Forbid();
+            if (entry.Role != UserRole.SuperAdmin)
+                return BadRequest(new { message = "Змінити власну роль можна лише через налаштування передачі прав SuperAdmin." });
 
-        if (existing.Role == UserRole.Manager && entry.Role == UserRole.Driver && currentRole != UserRole.SuperAdmin)
-            return Forbid();
+            existing.PhoneNumber = entry.PhoneNumber;
+            existing.IsActive = entry.IsActive;
+        }
+        else
+        {
+            if (existing.Role == UserRole.SuperAdmin && entry.Role != UserRole.SuperAdmin)
+                return Forbid();
 
-        if (!CanManageWhitelistRole(currentRole, entry.Role))
-            return Forbid();
+            if (existing.Role == UserRole.Manager && entry.Role == UserRole.Driver && currentRole != UserRole.SuperAdmin)
+                return Forbid();
 
-        existing.PhoneNumber = entry.PhoneNumber;
-        existing.Role = entry.Role;
-        existing.IsActive = entry.IsActive;
+            if (!CanManageWhitelistRole(currentRole, entry.Role))
+                return Forbid();
+
+            existing.PhoneNumber = entry.PhoneNumber;
+            existing.Role = entry.Role;
+            existing.IsActive = entry.IsActive;
+        }
+
         existing.CreatedAt = DateTime.SpecifyKind(existing.CreatedAt, DateTimeKind.Utc);
 
         var linkedProfile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == id);
@@ -81,7 +95,7 @@ public class UserWhitelistController : ControllerBase
             linkedProfile.Role = entry.Role;
             linkedProfile.PhoneNumber = entry.PhoneNumber;
             if (entry.Role == UserRole.Driver)
-                linkedProfile.DriverStatus = DriverStatus.Offline;
+                linkedProfile.UserStatus = UserStatus.Offline;
         }
 
         try
@@ -108,6 +122,10 @@ public class UserWhitelistController : ControllerBase
 
         var entry = await _context.UserWhitelists.FindAsync(id);
         if (entry is null) return NotFound();
+
+        var linkedProfile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == id);
+        if (linkedProfile is not null)
+            _context.UserProfiles.Remove(linkedProfile);
 
         _context.UserWhitelists.Remove(entry);
         await _context.SaveChangesAsync();

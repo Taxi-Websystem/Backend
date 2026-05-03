@@ -1,6 +1,6 @@
 namespace Backend.Models.Enums;
 
-public enum DriverStatus
+public enum UserStatus
 {
     Offline,
     Online,

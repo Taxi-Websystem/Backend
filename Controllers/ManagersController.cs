@@ -150,7 +150,7 @@ public class ManagersController : ControllerBase
 
             whitelistEntry.Role = UserRole.Driver;
             existing.Role = UserRole.Driver;
-            existing.DriverStatus = DriverStatus.Offline;
+            existing.UserStatus = UserStatus.Offline;
         }
 
         existing.Name = request.Name.Trim();
@@ -184,16 +184,28 @@ public class ManagersController : ControllerBase
 
     [HttpDelete("{id}")]
     [Authorize(Policy = "SuperAdminOnly")]
-    public async Task<IActionResult> Delete(int id)
+    public async Task<IActionResult> Delete(int id, [FromQuery] bool removeFromWhitelist = false)
     {
-        var manager = await _context.UserProfiles.FindAsync(id);
-        if (manager is null || (manager.Role != UserRole.Manager && manager.Role != UserRole.SuperAdmin))
+        var profile = await _context.UserProfiles.FindAsync(id);
+        if (profile is null)
             return NotFound();
 
-        if (manager.Role == UserRole.SuperAdmin)
-            return Forbid();
+        var whitelist = await _context.UserWhitelists.FindAsync(profile.UserId);
+        if (whitelist is null)
+            return NotFound();
 
-        _context.UserProfiles.Remove(manager);
+        /* GET /managers показує Role з whitelist; профіль інколи розходиться з whitelist → не покладатися лише на profile.Role */
+        if (whitelist.Role != UserRole.Manager && whitelist.Role != UserRole.SuperAdmin)
+            return NotFound();
+
+        if (whitelist.Role == UserRole.SuperAdmin)
+            return BadRequest(new { message = "Неможливо видалити обліковий запис адміністратора (SuperAdmin)." });
+
+        _context.UserProfiles.Remove(profile);
+
+        if (removeFromWhitelist)
+            _context.UserWhitelists.Remove(whitelist);
+
         await _context.SaveChangesAsync();
         return NoContent();
     }

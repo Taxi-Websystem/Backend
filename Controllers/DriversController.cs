@@ -1,9 +1,11 @@
 using Backend.Data;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace Backend.Controllers;
 
@@ -90,9 +92,16 @@ public class DriversController : ControllerBase
         if (await _context.UserProfiles.AnyAsync(p => p.UserId == whitelistEntry.Id))
             return BadRequest(new { message = "Профіль для цього номера вже існує." });
 
+        if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarMake))
+            return BadRequest(new { message = "Марка авто: лише латинські літери, цифри, пробіл та дефіс." });
+        if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarModel))
+            return BadRequest(new { message = "Модель авто: лише латинські літери, цифри, пробіл та дефіс." });
+        if (!CarFieldValidation.IsValidCarColorUa(driver.CarColor))
+            return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та пробіли." });
+
         driver.UserId = whitelistEntry.Id;
         driver.PhoneNumber = whitelistEntry.PhoneNumber;
-        driver.DriverStatus = DriverStatus.Offline;
+        driver.UserStatus = UserStatus.Offline;
 
         _context.UserProfiles.Add(driver);
         await _context.SaveChangesAsync();
@@ -119,6 +128,27 @@ public class DriversController : ControllerBase
         if (whitelistEntry is null || !whitelistEntry.IsActive || whitelistEntry.Role != UserRole.Driver)
             return BadRequest(new { message = "Активний запис водія у whitelist не знайдено." });
 
+        var actorRole = GetActorRole();
+        var targetRole = driver.Role;
+
+        if (targetRole != UserRole.Driver && targetRole != UserRole.Manager)
+            return BadRequest(new { message = "Дозволені лише ролі Водій або Менеджер." });
+
+        if (targetRole == UserRole.Manager && actorRole != UserRole.SuperAdmin)
+            return StatusCode(StatusCodes.Status403Forbidden,
+                new { message = "Призначити менеджера з картки водія може лише адміністратор." });
+
+        if (targetRole == UserRole.Manager)
+        {
+            whitelistEntry.Role = UserRole.Manager;
+            existingDriver.Role = UserRole.Manager;
+        }
+        else
+        {
+            whitelistEntry.Role = UserRole.Driver;
+            existingDriver.Role = UserRole.Driver;
+        }
+
         if (normalizedPhone != whitelistEntry.PhoneNumber)
         {
             var phoneTaken = await _context.UserWhitelists
@@ -127,14 +157,21 @@ public class DriversController : ControllerBase
                 return BadRequest(new { message = "Номер телефону вже зайнятий." });
         }
 
+        if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarMake))
+            return BadRequest(new { message = "Марка авто: лише латинські літери, цифри, пробіл та дефіс." });
+        if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarModel))
+            return BadRequest(new { message = "Модель авто: лише латинські літери, цифри, пробіл та дефіс." });
+        if (!CarFieldValidation.IsValidCarColorUa(driver.CarColor))
+            return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та пробіли." });
+
         whitelistEntry.PhoneNumber = normalizedPhone;
         existingDriver.PhoneNumber = normalizedPhone;
         existingDriver.Name = driver.Name;
         existingDriver.CarMake = driver.CarMake;
         existingDriver.CarModel = driver.CarModel;
+        existingDriver.CarColor = driver.CarColor;
         existingDriver.LicensePlate = driver.LicensePlate;
-        existingDriver.DriverStatus = driver.DriverStatus;
-        existingDriver.Role = UserRole.Driver;
+        existingDriver.UserStatus = targetRole == UserRole.Manager ? UserStatus.Offline : driver.UserStatus;
         existingDriver.UserId = whitelistEntry.Id;
 
         try
@@ -143,7 +180,7 @@ public class DriversController : ControllerBase
         }
         catch (DbUpdateConcurrencyException)
         {
-            if (!await _context.UserProfiles.AnyAsync(d => d.Id == id && d.Role == UserRole.Driver))
+            if (!await _context.UserProfiles.AnyAsync(d => d.Id == id))
                 return NotFound();
             throw;
         }
@@ -152,15 +189,32 @@ public class DriversController : ControllerBase
     }
 
     [HttpDelete("{id}")]
-    public async Task<IActionResult> Delete(int id)
+    public async Task<IActionResult> Delete(int id, [FromQuery] bool removeFromWhitelist = false)
     {
         var driver = await _context.UserProfiles.FindAsync(id);
         if (driver is null || driver.Role != UserRole.Driver)
             return NotFound();
 
+        var whitelist = await _context.UserWhitelists.FindAsync(driver.UserId);
+        if (whitelist is null)
+            return NotFound();
+
+        if (whitelist.Role != UserRole.Driver)
+            return BadRequest(new { message = "Цей профіль не є активним водієм у whitelist." });
+
         _context.UserProfiles.Remove(driver);
+
+        if (removeFromWhitelist)
+            _context.UserWhitelists.Remove(whitelist);
+
         await _context.SaveChangesAsync();
         return NoContent();
+    }
+
+    private UserRole GetActorRole()
+    {
+        var role = User.FindFirstValue(ClaimTypes.Role);
+        return Enum.TryParse<UserRole>(role, out var parsed) ? parsed : UserRole.Driver;
     }
 
     private static string? NormalizePhone(string phone)

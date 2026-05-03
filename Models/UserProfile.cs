@@ -24,10 +24,13 @@ public class UserProfile
     [MaxLength(50)]
     public string? CarModel { get; set; }
 
+    [MaxLength(50)]
+    public string? CarColor { get; set; }
+
     [MaxLength(20)]
     public string? LicensePlate { get; set; }
 
     public UserRole Role { get; set; }
 
-    public DriverStatus DriverStatus { get; set; } = DriverStatus.Offline;
+    public UserStatus UserStatus { get; set; } = UserStatus.Offline;
 }

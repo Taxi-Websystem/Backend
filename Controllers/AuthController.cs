@@ -1,9 +1,11 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Text.RegularExpressions;
 using Backend.Data;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,6 +18,8 @@ namespace Backend.Controllers;
 [Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
+    private static readonly Regex LicensePlatePattern = new(@"^[\p{L}]{2}\d{4}[\p{L}]{2}$", RegexOptions.Compiled);
+
     private readonly ApplicationDbContext _context;
     private readonly IMemoryCache _cache;
     private readonly IConfiguration _configuration;
@@ -82,7 +86,7 @@ public class AuthController : ControllerBase
                 PhoneNumber = whitelist.PhoneNumber,
                 Name = whitelist.PhoneNumber,
                 Role = whitelist.Role,
-                DriverStatus = DriverStatus.Offline
+                UserStatus = UserStatus.Offline
             });
         }
         else
@@ -97,8 +101,7 @@ public class AuthController : ControllerBase
         var profileRow = await _context.UserProfiles.AsNoTracking()
             .FirstAsync(p => p.UserId == whitelist.Id);
 
-        var requiresRegistration = string.IsNullOrWhiteSpace(profileRow.Name)
-            || profileRow.Name == profileRow.PhoneNumber;
+        var requiresRegistration = ProfileRequiresRegistration(profileRow);
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -126,6 +129,33 @@ public class AuthController : ControllerBase
         });
     }
 
+    /// <summary>Стан профілю для фронтенду (префіл форми завершення реєстрації).</summary>
+    [HttpGet("me")]
+    [Authorize]
+    public async Task<ActionResult<AuthMeDto>> GetMe()
+    {
+        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(idClaim, out var whitelistId))
+            return Unauthorized(new { message = "Невалідний токен." });
+
+        var whitelist = await _context.UserWhitelists.AsNoTracking()
+            .FirstOrDefaultAsync(w => w.Id == whitelistId);
+        var profile = await _context.UserProfiles.AsNoTracking()
+            .FirstOrDefaultAsync(p => p.UserId == whitelistId);
+
+        if (whitelist is null || profile is null)
+            return NotFound(new { message = "Профіль не знайдено." });
+
+        return Ok(new AuthMeDto(
+            whitelist.PhoneNumber,
+            profile.Name,
+            profile.CarMake,
+            profile.CarModel,
+            profile.CarColor,
+            profile.LicensePlate,
+            whitelist.Role.ToString()));
+    }
+
     [HttpPost("complete-registration")]
     [Authorize]
     public async Task<IActionResult> CompleteRegistration([FromBody] CompleteRegistrationRequest request)
@@ -137,14 +167,55 @@ public class AuthController : ControllerBase
         if (!int.TryParse(idClaim, out var whitelistId))
             return Unauthorized(new { message = "Невалідний токен." });
 
+        var roleClaim = User.FindFirstValue(ClaimTypes.Role);
+        if (!Enum.TryParse<UserRole>(roleClaim, out var userRole))
+            return Unauthorized(new { message = "Невалідна роль у токені." });
+
         var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == whitelistId);
         if (profile is null)
             return NotFound(new { message = "Профіль не знайдено." });
 
         profile.Name = request.Name.Trim();
+
+        if (userRole == UserRole.Driver)
+        {
+            if (string.IsNullOrWhiteSpace(request.CarBrand))
+                return BadRequest(new { message = "Марка авто обов'язкова для водія." });
+            if (!CarFieldValidation.IsValidCarBrandOrModel(request.CarBrand))
+                return BadRequest(new { message = "Марка авто: лише латинські літери, цифри, пробіл та дефіс." });
+            if (string.IsNullOrWhiteSpace(request.CarModel))
+                return BadRequest(new { message = "Модель авто обов'язкова для водія." });
+            if (!CarFieldValidation.IsValidCarBrandOrModel(request.CarModel))
+                return BadRequest(new { message = "Модель авто: лише латинські літери, цифри, пробіл та дефіс." });
+            if (string.IsNullOrWhiteSpace(request.CarColor))
+                return BadRequest(new { message = "Колір авто обов'язковий для водія." });
+            if (!CarFieldValidation.IsValidCarColorUa(request.CarColor))
+                return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та пробіли." });
+            if (string.IsNullOrWhiteSpace(request.LicensePlate))
+                return BadRequest(new { message = "Номер авто обов'язковий для водія." });
+
+            var plate = NormalizeLicensePlate(request.LicensePlate);
+            if (plate is null || !LicensePlatePattern.IsMatch(plate))
+                return BadRequest(new { message = "Некоректний номер авто. Формат: 2 літери (латиниця або кирилиця), 4 цифри, 2 літери." });
+
+            profile.CarMake = request.CarBrand.Trim();
+            profile.CarModel = request.CarModel.Trim();
+            profile.CarColor = request.CarColor.Trim();
+            profile.LicensePlate = plate;
+        }
+
         await _context.SaveChangesAsync();
 
         return NoContent();
+    }
+
+    private static string? NormalizeLicensePlate(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+        // Літери латиницею та кирилицею + цифри
+        var s = new string(raw.Where(c => char.IsLetter(c) || char.IsDigit(c)).ToArray()).ToUpperInvariant();
+        return s.Length == 8 ? s : null;
     }
 
     [HttpPost("transfer-superadmin")]
@@ -186,7 +257,7 @@ public class AuthController : ControllerBase
                 PhoneNumber = currentWhitelist.PhoneNumber,
                 Name = currentWhitelist.PhoneNumber,
                 Role = UserRole.Manager,
-                DriverStatus = DriverStatus.Offline
+                UserStatus = UserStatus.Offline
             });
         }
         else
@@ -204,7 +275,7 @@ public class AuthController : ControllerBase
                 PhoneNumber = targetWhitelist.PhoneNumber,
                 Name = targetWhitelist.PhoneNumber,
                 Role = UserRole.SuperAdmin,
-                DriverStatus = DriverStatus.Offline
+                UserStatus = UserStatus.Offline
             });
         }
         else
@@ -248,9 +319,47 @@ public class AuthController : ControllerBase
 
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
+
+    /// <summary>
+    /// Потрібне завершення реєстрації: немає імені (або залишено placeholder телефону),
+    /// або водій без повних даних авто (у т.ч. після переведення з менеджера).
+    /// </summary>
+    private static bool ProfileRequiresRegistration(UserProfile p)
+    {
+        if (string.IsNullOrWhiteSpace(p.Name))
+            return true;
+        if (p.Name == p.PhoneNumber)
+            return true;
+
+        if (p.Role != UserRole.Driver)
+            return false;
+
+        return string.IsNullOrWhiteSpace(p.CarMake)
+               || string.IsNullOrWhiteSpace(p.CarModel)
+               || string.IsNullOrWhiteSpace(p.CarColor)
+               || string.IsNullOrWhiteSpace(p.LicensePlate);
+    }
 }
+
+public record AuthMeDto(
+    string PhoneNumber,
+    string Name,
+    string? CarBrand,
+    string? CarModel,
+    string? CarColor,
+    string? LicensePlate,
+    string Role);
 
 public record SendCodeRequest(string PhoneNumber);
 public record VerifyCodeRequest(string PhoneNumber, string Code);
-public record CompleteRegistrationRequest(string Name);
+
+public class CompleteRegistrationRequest
+{
+    public string Name { get; set; } = string.Empty;
+    public string? CarBrand { get; set; }
+    public string? CarModel { get; set; }
+    public string? CarColor { get; set; }
+    public string? LicensePlate { get; set; }
+}
+
 public record TransferSuperAdminRequest(int TargetWhitelistId);
