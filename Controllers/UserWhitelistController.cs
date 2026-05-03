@@ -1,14 +1,16 @@
 using Backend.Data;
 using Backend.Models;
+using Backend.Models.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace Backend.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize]
+[Authorize(Policy = "ManagerOrSuperAdmin")]
 public class UserWhitelistController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
@@ -35,6 +37,10 @@ public class UserWhitelistController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<UserWhitelist>> Create(UserWhitelist entry)
     {
+        var currentRole = GetCurrentRole();
+        if (!CanManageWhitelistRole(currentRole, entry.Role))
+            return Forbid();
+
         entry.CreatedAt = DateTime.UtcNow;
         _context.UserWhitelists.Add(entry);
         await _context.SaveChangesAsync();
@@ -46,6 +52,11 @@ public class UserWhitelistController : ControllerBase
     {
         if (id != entry.Id) return BadRequest();
 
+        var currentRole = GetCurrentRole();
+        if (!CanManageWhitelistRole(currentRole, entry.Role))
+            return Forbid();
+
+        entry.CreatedAt = DateTime.SpecifyKind(entry.CreatedAt, DateTimeKind.Utc);
         _context.Entry(entry).State = EntityState.Modified;
         try
         {
@@ -62,6 +73,7 @@ public class UserWhitelistController : ControllerBase
     }
 
     [HttpDelete("{id}")]
+    [Authorize(Policy = "SuperAdminOnly")]
     public async Task<IActionResult> Delete(int id)
     {
         var entry = await _context.UserWhitelists.FindAsync(id);
@@ -70,5 +82,27 @@ public class UserWhitelistController : ControllerBase
         _context.UserWhitelists.Remove(entry);
         await _context.SaveChangesAsync();
         return NoContent();
+    }
+
+    private UserRole GetCurrentRole()
+    {
+        var role = User.FindFirstValue(ClaimTypes.Role);
+        if (!Enum.TryParse<UserRole>(role, out var parsedRole))
+            return UserRole.Driver;
+
+        return parsedRole;
+    }
+
+    private static bool CanManageWhitelistRole(UserRole actorRole, UserRole targetRole)
+    {
+        if (targetRole == UserRole.SuperAdmin)
+            return false;
+
+        return actorRole switch
+        {
+            UserRole.SuperAdmin => targetRole is UserRole.Driver or UserRole.Manager,
+            UserRole.Manager => targetRole == UserRole.Driver,
+            _ => false
+        };
     }
 }

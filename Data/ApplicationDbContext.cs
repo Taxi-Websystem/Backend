@@ -49,7 +49,7 @@ public class ApplicationDbContext : DbContext
             PhoneNumber = "+380967515075",
             Role = UserRole.SuperAdmin,
             IsActive = true,
-            CreatedAt = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+            CreatedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc)
         });
     }
 }

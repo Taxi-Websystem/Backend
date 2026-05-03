@@ -28,4 +28,6 @@ public class UserProfile
     public string? LicensePlate { get; set; }
 
     public UserRole Role { get; set; }
+
+    public DriverStatus DriverStatus { get; set; } = DriverStatus.Offline;
 }
