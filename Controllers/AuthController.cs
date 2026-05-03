@@ -94,6 +94,12 @@ public class AuthController : ControllerBase
 
         await _context.SaveChangesAsync();
 
+        var profileRow = await _context.UserProfiles.AsNoTracking()
+            .FirstAsync(p => p.UserId == whitelist.Id);
+
+        var requiresRegistration = string.IsNullOrWhiteSpace(profileRow.Name)
+            || profileRow.Name == profileRow.PhoneNumber;
+
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
@@ -115,8 +121,30 @@ public class AuthController : ControllerBase
         return Ok(new
         {
             token = new JwtSecurityTokenHandler().WriteToken(token),
-            role = whitelist.Role.ToString()
+            role = whitelist.Role.ToString(),
+            requiresRegistration
         });
+    }
+
+    [HttpPost("complete-registration")]
+    [Authorize]
+    public async Task<IActionResult> CompleteRegistration([FromBody] CompleteRegistrationRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { message = "Ім'я обов'язкове." });
+
+        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!int.TryParse(idClaim, out var whitelistId))
+            return Unauthorized(new { message = "Невалідний токен." });
+
+        var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == whitelistId);
+        if (profile is null)
+            return NotFound(new { message = "Профіль не знайдено." });
+
+        profile.Name = request.Name.Trim();
+        await _context.SaveChangesAsync();
+
+        return NoContent();
     }
 
     [HttpPost("transfer-superadmin")]
@@ -224,4 +252,5 @@ public class AuthController : ControllerBase
 
 public record SendCodeRequest(string PhoneNumber);
 public record VerifyCodeRequest(string PhoneNumber, string Code);
+public record CompleteRegistrationRequest(string Name);
 public record TransferSuperAdminRequest(int TargetWhitelistId);

@@ -25,7 +25,11 @@ public class DriversController : ControllerBase
         var drivers = await (from profile in _context.UserProfiles
                              join whitelist in _context.UserWhitelists
                                  on profile.UserId equals whitelist.Id
-                             where profile.Role == UserRole.Driver && whitelist.IsActive
+                             where profile.Role == UserRole.Driver
+                                   && whitelist.Role == UserRole.Driver
+                                   && whitelist.IsActive
+                                   && !string.IsNullOrWhiteSpace(profile.Name)
+                                   && profile.Name != profile.PhoneNumber
                              select profile)
             .ToListAsync();
 
@@ -39,7 +43,10 @@ public class DriversController : ControllerBase
         if (driver is null || driver.Role != UserRole.Driver)
             return NotFound();
 
-        if (!await IsActiveWhitelistEntry(driver.UserId))
+        if (!await _context.UserWhitelists.AnyAsync(w =>
+                w.Id == driver.UserId &&
+                w.IsActive &&
+                w.Role == UserRole.Driver))
             return NotFound();
 
         return driver;
@@ -49,8 +56,43 @@ public class DriversController : ControllerBase
     public async Task<ActionResult<UserProfile>> Create(UserProfile driver)
     {
         driver.Role = UserRole.Driver;
-        if (!await IsActiveWhitelistEntry(driver.UserId))
-            return BadRequest(new { message = "Користувач має бути активним у whitelist." });
+        var phone = NormalizePhone(driver.PhoneNumber);
+        if (phone is null)
+            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+
+        var whitelistEntry = await _context.UserWhitelists
+            .FirstOrDefaultAsync(w => w.PhoneNumber == phone);
+        if (whitelistEntry is null)
+        {
+            whitelistEntry = new UserWhitelist
+            {
+                PhoneNumber = phone,
+                Role = UserRole.Driver,
+                IsActive = true,
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.UserWhitelists.Add(whitelistEntry);
+            await _context.SaveChangesAsync();
+        }
+        else
+        {
+            if (!whitelistEntry.IsActive)
+                return BadRequest(new { message = "Whitelist запис неактивний." });
+
+            if (whitelistEntry.Role is UserRole.Manager or UserRole.SuperAdmin)
+                return BadRequest(new { message = "Для цього номера вже призначена адміністративна роль." });
+
+            whitelistEntry.Role = UserRole.Driver;
+            _context.UserWhitelists.Update(whitelistEntry);
+            await _context.SaveChangesAsync();
+        }
+
+        if (await _context.UserProfiles.AnyAsync(p => p.UserId == whitelistEntry.Id))
+            return BadRequest(new { message = "Профіль для цього номера вже існує." });
+
+        driver.UserId = whitelistEntry.Id;
+        driver.PhoneNumber = whitelistEntry.PhoneNumber;
+        driver.DriverStatus = DriverStatus.Offline;
 
         _context.UserProfiles.Add(driver);
         await _context.SaveChangesAsync();
@@ -63,11 +105,37 @@ public class DriversController : ControllerBase
         if (id != driver.Id)
             return BadRequest();
 
-        if (!await IsActiveWhitelistEntry(driver.UserId))
-            return BadRequest(new { message = "Користувач має бути активним у whitelist." });
+        var existingDriver = await _context.UserProfiles.FindAsync(id);
+        if (existingDriver is null || existingDriver.Role != UserRole.Driver)
+            return NotFound();
 
-        driver.Role = UserRole.Driver;
-        _context.Entry(driver).State = EntityState.Modified;
+        var normalizedPhone = NormalizePhone(driver.PhoneNumber);
+        if (normalizedPhone is null)
+            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+
+        var whitelistEntry = await _context.UserWhitelists
+            .FirstOrDefaultAsync(w => w.Id == existingDriver.UserId);
+
+        if (whitelistEntry is null || !whitelistEntry.IsActive || whitelistEntry.Role != UserRole.Driver)
+            return BadRequest(new { message = "Активний запис водія у whitelist не знайдено." });
+
+        if (normalizedPhone != whitelistEntry.PhoneNumber)
+        {
+            var phoneTaken = await _context.UserWhitelists
+                .AnyAsync(w => w.PhoneNumber == normalizedPhone && w.Id != whitelistEntry.Id);
+            if (phoneTaken)
+                return BadRequest(new { message = "Номер телефону вже зайнятий." });
+        }
+
+        whitelistEntry.PhoneNumber = normalizedPhone;
+        existingDriver.PhoneNumber = normalizedPhone;
+        existingDriver.Name = driver.Name;
+        existingDriver.CarMake = driver.CarMake;
+        existingDriver.CarModel = driver.CarModel;
+        existingDriver.LicensePlate = driver.LicensePlate;
+        existingDriver.DriverStatus = driver.DriverStatus;
+        existingDriver.Role = UserRole.Driver;
+        existingDriver.UserId = whitelistEntry.Id;
 
         try
         {
@@ -95,8 +163,17 @@ public class DriversController : ControllerBase
         return NoContent();
     }
 
-    private Task<bool> IsActiveWhitelistEntry(int userId)
+    private static string? NormalizePhone(string phone)
     {
-        return _context.UserWhitelists.AnyAsync(w => w.Id == userId && w.IsActive);
+        if (string.IsNullOrWhiteSpace(phone))
+            return null;
+
+        var normalized = phone.Trim();
+        if (!normalized.StartsWith("+380"))
+            return null;
+
+        return normalized.Length == 13 && normalized.Skip(1).All(char.IsDigit)
+            ? normalized
+            : null;
     }
 }
