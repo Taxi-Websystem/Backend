@@ -97,7 +97,7 @@ public class DriversController : ControllerBase
         if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarModel))
             return BadRequest(new { message = "Модель авто: лише латинські літери, цифри, пробіл та дефіс." });
         if (!CarFieldValidation.IsValidCarColorUa(driver.CarColor))
-            return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та пробіли." });
+            return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та дефіс." });
 
         driver.UserId = whitelistEntry.Id;
         driver.PhoneNumber = whitelistEntry.PhoneNumber;
@@ -174,7 +174,7 @@ public class DriversController : ControllerBase
         if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarModel))
             return BadRequest(new { message = "Модель авто: лише латинські літери, цифри, пробіл та дефіс." });
         if (!CarFieldValidation.IsValidCarColorUa(driver.CarColor))
-            return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та пробіли." });
+            return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та дефіс." });
 
         whitelistEntry.PhoneNumber = normalizedPhone;
         existingDriver.PhoneNumber = normalizedPhone;

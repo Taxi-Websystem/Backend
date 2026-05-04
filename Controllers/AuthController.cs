@@ -190,7 +190,7 @@ public class AuthController : ControllerBase
             if (string.IsNullOrWhiteSpace(request.CarColor))
                 return BadRequest(new { message = "Колір авто обов'язковий для водія." });
             if (!CarFieldValidation.IsValidCarColorUa(request.CarColor))
-                return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та пробіли." });
+                return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та дефіс." });
             if (string.IsNullOrWhiteSpace(request.LicensePlate))
                 return BadRequest(new { message = "Номер авто обов'язковий для водія." });
 

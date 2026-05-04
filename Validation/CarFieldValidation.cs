@@ -6,7 +6,7 @@ namespace Backend.Validation;
 public static class CarFieldValidation
 {
     private static readonly Regex LatinBrandModel = new(@"^[A-Za-z0-9\s\-]+$", RegexOptions.Compiled);
-    private static readonly Regex CyrillicColor = new(@"^[\p{IsCyrillic}\s]+$", RegexOptions.Compiled);
+    private static readonly Regex CyrillicColor = new(@"^[\p{IsCyrillic}\-]+$", RegexOptions.Compiled);
 
     public static bool IsValidCarBrandOrModel(string? s) =>
         !string.IsNullOrWhiteSpace(s) && LatinBrandModel.IsMatch(s.Trim());
