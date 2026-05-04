@@ -1,5 +1,6 @@
 using Backend.Data;
 using Backend.Models;
+using Backend.Models.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -35,6 +36,10 @@ public class RidesController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<Ride>> Create(Ride ride)
     {
+        var validationError = await ValidateRideDriverAndRatingMessageAsync(ride);
+        if (validationError is not null)
+            return BadRequest(new { message = validationError });
+
         ride.StartTime = DateTime.UtcNow;
         _context.Rides.Add(ride);
         await _context.SaveChangesAsync();
@@ -45,6 +50,10 @@ public class RidesController : ControllerBase
     public async Task<IActionResult> Update(int id, Ride ride)
     {
         if (id != ride.Id) return BadRequest();
+
+        var validationError = await ValidateRideDriverAndRatingMessageAsync(ride);
+        if (validationError is not null)
+            return BadRequest(new { message = validationError });
 
         _context.Entry(ride).State = EntityState.Modified;
         try
@@ -70,5 +79,20 @@ public class RidesController : ControllerBase
         _context.Rides.Remove(ride);
         await _context.SaveChangesAsync();
         return NoContent();
+    }
+
+    private async Task<string?> ValidateRideDriverAndRatingMessageAsync(Ride ride)
+    {
+        if (ride.DriverProfileId.HasValue)
+        {
+            var profile = await _context.UserProfiles.FindAsync(ride.DriverProfileId.Value);
+            if (profile is null || profile.Role != UserRole.Driver)
+                return "Профіль водія для поїздки не знайдено або не є водієм.";
+        }
+
+        if (ride.Rating.HasValue && (ride.Rating.Value < 1m || ride.Rating.Value > 5m))
+            return "Оцінка поїздки має бути від 1 до 5.";
+
+        return null;
     }
 }

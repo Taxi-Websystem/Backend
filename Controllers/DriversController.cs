@@ -22,7 +22,7 @@ public class DriversController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<UserProfile>>> GetAll()
+    public async Task<ActionResult<IEnumerable<DriverListItemDto>>> GetAll()
     {
         var drivers = await (from profile in _context.UserProfiles
                              join whitelist in _context.UserWhitelists
@@ -35,7 +35,7 @@ public class DriversController : ControllerBase
                              select profile)
             .ToListAsync();
 
-        return drivers;
+        return drivers.Select(DriverListItemDto.FromProfile).ToList();
     }
 
     [HttpGet("{id}")]
@@ -102,6 +102,18 @@ public class DriversController : ControllerBase
         driver.UserId = whitelistEntry.Id;
         driver.PhoneNumber = whitelistEntry.PhoneNumber;
         driver.UserStatus = UserStatus.Offline;
+
+        var actorRole = GetActorRole();
+        if (actorRole == UserRole.SuperAdmin)
+        {
+            if (!TryValidateDashboardStats(driver.TripCount, driver.AverageRating, out var statsError))
+                return BadRequest(new { message = statsError });
+        }
+        else
+        {
+            driver.TripCount = 0;
+            driver.AverageRating = null;
+        }
 
         _context.UserProfiles.Add(driver);
         await _context.SaveChangesAsync();
@@ -174,6 +186,14 @@ public class DriversController : ControllerBase
         existingDriver.UserStatus = targetRole == UserRole.Manager ? UserStatus.Offline : driver.UserStatus;
         existingDriver.UserId = whitelistEntry.Id;
 
+        if (actorRole == UserRole.SuperAdmin)
+        {
+            if (!TryValidateDashboardStats(driver.TripCount, driver.AverageRating, out var statsError))
+                return BadRequest(new { message = statsError });
+            existingDriver.TripCount = driver.TripCount;
+            existingDriver.AverageRating = driver.AverageRating;
+        }
+
         try
         {
             await _context.SaveChangesAsync();
@@ -229,5 +249,27 @@ public class DriversController : ControllerBase
         return normalized.Length == 13 && normalized.Skip(1).All(char.IsDigit)
             ? normalized
             : null;
+    }
+
+    private static bool TryValidateDashboardStats(int tripCount, decimal? averageRating, out string? error)
+    {
+        error = null;
+        if (tripCount < 0)
+        {
+            error = "Кількість поїздок не може бути від'ємною.";
+            return false;
+        }
+
+        if (!averageRating.HasValue)
+            return true;
+
+        var r = averageRating.Value;
+        if (r < 1m || r > 5m)
+        {
+            error = "Середній рейтинг має бути від 1 до 5 або не заданий.";
+            return false;
+        }
+
+        return true;
     }
 }

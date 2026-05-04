@@ -114,7 +114,6 @@ public class ManagersController : ControllerBase
     }
 
     [HttpPut("{id}")]
-    [Authorize(Policy = "SuperAdminOnly")]
     public async Task<IActionResult> Update(int id, UpdateManagerRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
@@ -137,6 +136,21 @@ public class ManagersController : ControllerBase
         if (whitelistEntry is null)
             return BadRequest(new { message = "Whitelist запис користувача не знайдено." });
 
+        var actorRole = User.FindFirstValue(ClaimTypes.Role);
+        var isSuperAdminActor = string.Equals(actorRole, UserRole.SuperAdmin.ToString(), StringComparison.Ordinal);
+
+        if (!isSuperAdminActor)
+        {
+            if (!isSelfEdit)
+                return Forbid();
+
+            if (request.Role.HasValue && request.Role.Value != existing.Role)
+                return Forbid();
+
+            if (!string.IsNullOrWhiteSpace(request.PhoneNumber))
+                return BadRequest(new { message = "Менеджер може змінювати лише власне ім'я." });
+        }
+
         if (request.Role.HasValue && request.Role.Value != existing.Role)
         {
             if (isSelfEdit)
@@ -156,7 +170,7 @@ public class ManagersController : ControllerBase
         existing.Name = request.Name.Trim();
         _context.UserProfiles.Update(existing);
 
-        if (!string.IsNullOrWhiteSpace(request.PhoneNumber))
+        if (isSuperAdminActor && !string.IsNullOrWhiteSpace(request.PhoneNumber))
         {
             var normalizedPhone = NormalizePhone(request.PhoneNumber);
             if (normalizedPhone is null)
@@ -194,7 +208,6 @@ public class ManagersController : ControllerBase
         if (whitelist is null)
             return NotFound();
 
-        /* GET /managers показує Role з whitelist; профіль інколи розходиться з whitelist → не покладатися лише на profile.Role */
         if (whitelist.Role != UserRole.Manager && whitelist.Role != UserRole.SuperAdmin)
             return NotFound();
 

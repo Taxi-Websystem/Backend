@@ -43,6 +43,12 @@ public class ApplicationDbContext : DbContext
             }
         }
 
+        modelBuilder.Entity<Ride>()
+            .HasOne(r => r.DriverProfile)
+            .WithMany()
+            .HasForeignKey(r => r.DriverProfileId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         modelBuilder.Entity<UserWhitelist>().HasData(new UserWhitelist
         {
             Id = 1,

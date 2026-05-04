@@ -32,4 +32,13 @@ public class Ride
 
     [Column(TypeName = "decimal(10,2)")]
     public decimal Price { get; set; }
+
+    /// <summary>FK to <see cref="UserProfile.Id"/> when the ride is assigned to a driver profile.</summary>
+    public int? DriverProfileId { get; set; }
+
+    public UserProfile? DriverProfile { get; set; }
+
+    /// <summary>Passenger/client rating for this ride (1–5).</summary>
+    [Column(TypeName = "decimal(3,2)")]
+    public decimal? Rating { get; set; }
 }

@@ -62,7 +62,6 @@ public class UserWhitelistController : ControllerBase
 
         if (isSelf)
         {
-            /* Адмін може змінити власний номер і активність; роль лише SuperAdmin (зміна ролі — через передачу прав). */
             if (currentRole != UserRole.SuperAdmin || existing.Role != UserRole.SuperAdmin)
                 return Forbid();
             if (entry.Role != UserRole.SuperAdmin)
