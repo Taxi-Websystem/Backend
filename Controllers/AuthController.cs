@@ -129,6 +129,45 @@ public class AuthController : ControllerBase
         });
     }
 
+    [HttpGet("public-stats")]
+    [AllowAnonymous]
+    public async Task<ActionResult<LoginPublicStatsDto>> GetPublicStats()
+    {
+        var kyivZone = GetKyivTimeZone();
+        var kyivNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, kyivZone);
+        var kyivStart = kyivNow.Date;
+        var kyivEnd = kyivStart.AddDays(1);
+        var todayStartUtc = TimeZoneInfo.ConvertTimeToUtc(kyivStart, kyivZone);
+        var tomorrowStartUtc = TimeZoneInfo.ConvertTimeToUtc(kyivEnd, kyivZone);
+
+        var onlineDrivers = await (from profile in _context.UserProfiles
+                                   join whitelist in _context.UserWhitelists on profile.UserId equals whitelist.Id
+                                   where profile.Role == UserRole.Driver
+                                         && whitelist.Role == UserRole.Driver
+                                         && whitelist.IsActive
+                                         && profile.UserStatus == UserStatus.Online
+                                   select profile.Id)
+            .CountAsync();
+
+        var todayTrips = await _context.Rides
+            .Where(r => r.CreatedAt >= todayStartUtc && r.CreatedAt < tomorrowStartUtc)
+            .CountAsync();
+
+        return Ok(new LoginPublicStatsDto(onlineDrivers, todayTrips));
+    }
+
+    private static TimeZoneInfo GetKyivTimeZone()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("Europe/Kyiv");
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("FLE Standard Time");
+        }
+    }
+
     /// <summary>Стан профілю для фронтенду (префіл форми завершення реєстрації).</summary>
     [HttpGet("me")]
     [Authorize]
@@ -352,6 +391,7 @@ public record AuthMeDto(
 
 public record SendCodeRequest(string PhoneNumber);
 public record VerifyCodeRequest(string PhoneNumber, string Code);
+public record LoginPublicStatsDto(int OnlineDrivers, int TodayTrips);
 
 public class CompleteRegistrationRequest
 {

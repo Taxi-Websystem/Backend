@@ -24,18 +24,37 @@ public class DriversController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<DriverListItemDto>>> GetAll()
     {
-        var drivers = await (from profile in _context.UserProfiles
-                             join whitelist in _context.UserWhitelists
-                                 on profile.UserId equals whitelist.Id
-                             where profile.Role == UserRole.Driver
-                                   && whitelist.Role == UserRole.Driver
-                                   && whitelist.IsActive
-                                   && !string.IsNullOrWhiteSpace(profile.Name)
-                                   && profile.Name != profile.PhoneNumber
-                             select profile)
+        var driverRows = await (from profile in _context.UserProfiles
+                                join whitelist in _context.UserWhitelists
+                                    on profile.UserId equals whitelist.Id
+                                where profile.Role == UserRole.Driver
+                                      && whitelist.Role == UserRole.Driver
+                                      && whitelist.IsActive
+                                      && !string.IsNullOrWhiteSpace(profile.Name)
+                                      && profile.Name != profile.PhoneNumber
+                                join ride in _context.Rides.Where(r => r.Status == RideStatus.Completed)
+                                    on profile.Id equals ride.DriverId into ridesGroup
+                                select new DriverListItemDto
+                                {
+                                    Id = profile.Id,
+                                    UserId = profile.UserId,
+                                    PhoneNumber = profile.PhoneNumber,
+                                    Name = profile.Name,
+                                    CarMake = profile.CarMake,
+                                    CarModel = profile.CarModel,
+                                    CarColor = profile.CarColor,
+                                    LicensePlate = profile.LicensePlate,
+                                    Role = profile.Role,
+                                    UserStatus = profile.UserStatus,
+                                    TripCount = ridesGroup.Count(),
+                                    AverageRating = ridesGroup
+                                        .Where(r => r.Rating.HasValue)
+                                        .Select(r => r.Rating)
+                                        .Average()
+                                })
             .ToListAsync();
 
-        return drivers.Select(DriverListItemDto.FromProfile).ToList();
+        return driverRows;
     }
 
     [HttpGet("{id}")]
@@ -101,19 +120,8 @@ public class DriversController : ControllerBase
 
         driver.UserId = whitelistEntry.Id;
         driver.PhoneNumber = whitelistEntry.PhoneNumber;
-        driver.UserStatus = UserStatus.Offline;
-
-        var actorRole = GetActorRole();
-        if (actorRole == UserRole.SuperAdmin)
-        {
-            if (!TryValidateDashboardStats(driver.TripCount, driver.AverageRating, out var statsError))
-                return BadRequest(new { message = statsError });
-        }
-        else
-        {
-            driver.TripCount = 0;
-            driver.AverageRating = null;
-        }
+        // Temporary rule: newly created drivers start as Online.
+        driver.UserStatus = UserStatus.Online;
 
         _context.UserProfiles.Add(driver);
         await _context.SaveChangesAsync();
@@ -186,14 +194,6 @@ public class DriversController : ControllerBase
         existingDriver.UserStatus = targetRole == UserRole.Manager ? UserStatus.Offline : driver.UserStatus;
         existingDriver.UserId = whitelistEntry.Id;
 
-        if (actorRole == UserRole.SuperAdmin)
-        {
-            if (!TryValidateDashboardStats(driver.TripCount, driver.AverageRating, out var statsError))
-                return BadRequest(new { message = statsError });
-            existingDriver.TripCount = driver.TripCount;
-            existingDriver.AverageRating = driver.AverageRating;
-        }
-
         try
         {
             await _context.SaveChangesAsync();
@@ -251,25 +251,4 @@ public class DriversController : ControllerBase
             : null;
     }
 
-    private static bool TryValidateDashboardStats(int tripCount, decimal? averageRating, out string? error)
-    {
-        error = null;
-        if (tripCount < 0)
-        {
-            error = "Кількість поїздок не може бути від'ємною.";
-            return false;
-        }
-
-        if (!averageRating.HasValue)
-            return true;
-
-        var r = averageRating.Value;
-        if (r < 1m || r > 5m)
-        {
-            error = "Середній рейтинг має бути від 1 до 5 або не заданий.";
-            return false;
-        }
-
-        return true;
-    }
 }
