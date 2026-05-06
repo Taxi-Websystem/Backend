@@ -112,7 +112,6 @@ public class UserWhitelistController : ControllerBase
     }
 
     [HttpDelete("{id}")]
-    [Authorize(Policy = "SuperAdminOnly")]
     public async Task<IActionResult> Delete(int id)
     {
         var currentUserId = GetCurrentUserId();
@@ -121,6 +120,14 @@ public class UserWhitelistController : ControllerBase
 
         var entry = await _context.UserWhitelists.FindAsync(id);
         if (entry is null) return NotFound();
+
+        var currentRole = GetCurrentRole();
+
+        if (entry.Role == UserRole.SuperAdmin)
+            return Forbid();
+
+        if (currentRole == UserRole.Manager && entry.Role != UserRole.Driver)
+            return Forbid();
 
         var linkedProfile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == id);
         if (linkedProfile is not null)
