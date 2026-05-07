@@ -1,8 +1,10 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -14,10 +16,12 @@ namespace Backend.Controllers;
 public class UserWhitelistController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public UserWhitelistController(ApplicationDbContext context)
+    public UserWhitelistController(ApplicationDbContext context, IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
@@ -44,6 +48,7 @@ public class UserWhitelistController : ControllerBase
         entry.CreatedAt = DateTime.UtcNow;
         _context.UserWhitelists.Add(entry);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("whitelist", "create", entry.Id);
         return CreatedAtAction(nameof(GetById), new { id = entry.Id }, entry);
     }
 
@@ -108,6 +113,7 @@ public class UserWhitelistController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("whitelist", "update", existing.Id);
         return NoContent();
     }
 
@@ -135,8 +141,12 @@ public class UserWhitelistController : ControllerBase
 
         _context.UserWhitelists.Remove(entry);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("whitelist", "delete", entry.Id);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private UserRole GetCurrentRole()
     {

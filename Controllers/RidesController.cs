@@ -1,8 +1,10 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -14,10 +16,12 @@ namespace Backend.Controllers;
 public class RidesController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public RidesController(ApplicationDbContext context)
+    public RidesController(ApplicationDbContext context, IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
@@ -99,6 +103,7 @@ public class RidesController : ControllerBase
 
         _context.Rides.Add(ride);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("rides", "create", ride.DriverId);
         return CreatedAtAction(nameof(GetById), new { id = ride.Id }, new RideListItemDto
         {
             Id = ride.Id,
@@ -148,6 +153,7 @@ public class RidesController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("rides", "update", ride.DriverId);
         return NoContent();
     }
 
@@ -159,8 +165,12 @@ public class RidesController : ControllerBase
 
         _context.Rides.Remove(ride);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("rides", "delete", ride.DriverId);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int? userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private UserRole GetActorRole()
     {

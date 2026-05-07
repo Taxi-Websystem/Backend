@@ -1,8 +1,11 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -14,32 +17,75 @@ namespace Backend.Controllers;
 public class ManagersController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IUserSettingsService _userSettingsService;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public ManagersController(ApplicationDbContext context)
+    public ManagersController(
+        ApplicationDbContext context,
+        IUserSettingsService userSettingsService,
+        IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _userSettingsService = userSettingsService;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
     public async Task<ActionResult<IEnumerable<ManagerListItemDto>>> GetAll()
     {
-        var managers = await (from whitelist in _context.UserWhitelists
-                              where whitelist.Role == UserRole.Manager || whitelist.Role == UserRole.SuperAdmin
-                              join profile in _context.UserProfiles on whitelist.Id equals profile.UserId
-                              where !string.IsNullOrWhiteSpace(profile.Name)
-                                    && profile.Name != profile.PhoneNumber
-                              select new ManagerListItemDto
-                              {
-                                  Id = profile.Id,
-                                  UserId = whitelist.Id,
-                                  PhoneNumber = whitelist.PhoneNumber,
-                                  Name = profile.Name,
-                                  Role = whitelist.Role,
-                                  Status = whitelist.IsActive ? UserOnlineStatus.Online : UserOnlineStatus.Offline
-                              })
+        var managerRows = await (from whitelist in _context.UserWhitelists
+                                 where whitelist.Role == UserRole.Manager || whitelist.Role == UserRole.SuperAdmin
+                                 join profile in _context.UserProfiles on whitelist.Id equals profile.UserId
+                                 where !string.IsNullOrWhiteSpace(profile.Name)
+                                       && profile.Name != profile.PhoneNumber
+                                 select new { whitelist, profile })
+            .ToListAsync();
+
+        var hasChanges = false;
+        foreach (var row in managerRows)
+        {
+            var settings = await _userSettingsService.GetOrCreateAsync(row.profile.UserId);
+            if (!settings.IsAutoStatusEnabled)
+            {
+                // Для Manager/SuperAdmin автостатус завжди активний.
+                settings.IsAutoStatusEnabled = true;
+                hasChanges = true;
+            }
+
+            if (row.profile.UserStatus == UserStatus.InRide)
+            {
+                continue;
+            }
+
+            var shouldBeOnline = PresenceHub.HasActiveConnections(row.profile.UserId);
+            var targetStatus = shouldBeOnline ? UserStatus.Online : UserStatus.Offline;
+            if (row.profile.UserStatus != targetStatus)
+            {
+                row.profile.UserStatus = targetStatus;
+                hasChanges = true;
+            }
+        }
+
+        if (hasChanges)
+        {
+            await _context.SaveChangesAsync();
+        }
+
+        var managers = managerRows
+            .Select(row => new ManagerListItemDto
+            {
+                Id = row.profile.Id,
+                UserId = row.whitelist.Id,
+                PhoneNumber = row.whitelist.PhoneNumber,
+                Name = row.profile.Name,
+                Role = row.whitelist.Role,
+                Status = row.profile.UserStatus == UserStatus.Online
+                    ? UserOnlineStatus.Online
+                    : UserOnlineStatus.Offline
+            })
             .OrderBy(item => item.Role)
             .ThenBy(item => item.UserId)
-            .ToListAsync();
+            .ToList();
 
         return managers;
     }
@@ -96,6 +142,7 @@ public class ManagersController : ControllerBase
 
         _context.UserProfiles.Add(manager);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("managers", "create", manager.UserId);
 
         return CreatedAtAction(nameof(GetById), new { id = manager.Id }, manager);
     }
@@ -193,6 +240,7 @@ public class ManagersController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("managers", "update", existing.UserId);
         return NoContent();
     }
 
@@ -220,8 +268,12 @@ public class ManagersController : ControllerBase
             _context.UserWhitelists.Remove(whitelist);
 
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("managers", "delete", profile.UserId);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private Task<bool> IsActiveWhitelistEntry(int userId)
     {

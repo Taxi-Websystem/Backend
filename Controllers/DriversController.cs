@@ -1,9 +1,11 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
 using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -15,10 +17,12 @@ namespace Backend.Controllers;
 public class DriversController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public DriversController(ApplicationDbContext context)
+    public DriversController(ApplicationDbContext context, IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
@@ -120,11 +124,12 @@ public class DriversController : ControllerBase
 
         driver.UserId = whitelistEntry.Id;
         driver.PhoneNumber = whitelistEntry.PhoneNumber;
-        // Temporary rule: newly created drivers start as Online.
-        driver.UserStatus = UserStatus.Online;
+        // Новий профіль стартує Offline, далі статус керується PresenceHub/налаштуваннями.
+        driver.UserStatus = UserStatus.Offline;
 
         _context.UserProfiles.Add(driver);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("drivers", "create", driver.UserId);
         return CreatedAtAction(nameof(GetById), new { id = driver.Id }, driver);
     }
 
@@ -205,6 +210,7 @@ public class DriversController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("drivers", "update", existingDriver.UserId);
         return NoContent();
     }
 
@@ -228,8 +234,12 @@ public class DriversController : ControllerBase
             _context.UserWhitelists.Remove(whitelist);
 
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("drivers", "delete", driver.UserId);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private UserRole GetActorRole()
     {

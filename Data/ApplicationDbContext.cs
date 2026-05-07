@@ -15,6 +15,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserWhitelist> UserWhitelists => Set<UserWhitelist>();
     public DbSet<UserProfile> UserProfiles => Set<UserProfile>();
     public DbSet<Ride> Rides => Set<Ride>();
+    public DbSet<UserSettings> UserSettings => Set<UserSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -51,6 +52,11 @@ public class ApplicationDbContext : DbContext
             .HasForeignKey(r => r.DriverId)
             .OnDelete(DeleteBehavior.SetNull);
 
+        modelBuilder.Entity<UserWhitelist>()
+            .HasOne(w => w.Settings)
+            .WithOne(s => s.UserWhitelist)
+            .HasForeignKey<UserSettings>(s => s.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<Ride>()
             .Property(r => r.Rating)
             .HasPrecision(5, 2);
@@ -74,7 +80,6 @@ public class ApplicationDbContext : DbContext
                     ? new List<RideRoutePoint>()
                     : JsonSerializer.Deserialize<List<RideRoutePoint>>(v, (JsonSerializerOptions?)null) ?? new List<RideRoutePoint>())
             .HasColumnType("longtext");
-
         modelBuilder.Entity<UserWhitelist>().HasData(new UserWhitelist
         {
             Id = 1,
