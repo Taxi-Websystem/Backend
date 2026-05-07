@@ -4,6 +4,7 @@ using Backend.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Backend.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260503121442_AddDriverStatusToUserProfile")]
+    partial class AddDriverStatusToUserProfile
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -30,11 +33,15 @@ namespace Backend.Migrations
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime(6)");
+                    b.Property<string>("ClientName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
 
-                    b.Property<int?>("DriverId")
-                        .HasColumnType("int");
+                    b.Property<string>("ClientPhone")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)");
 
                     b.Property<DateTime?>("EndTime")
                         .HasColumnType("datetime(6)");
@@ -44,19 +51,14 @@ namespace Backend.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("varchar(300)");
 
-                    b.Property<decimal?>("Rating")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("decimal(5,2)");
+                    b.Property<decimal>("Price")
+                        .HasColumnType("decimal(10,2)");
 
-                    b.Property<string>("Route")
-                        .IsRequired()
+                    b.Property<string>("RouteJson")
                         .HasColumnType("longtext");
 
-                    b.Property<DateTime?>("StartTime")
+                    b.Property<DateTime>("StartTime")
                         .HasColumnType("datetime(6)");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("int");
 
                     b.Property<string>("ToAddress")
                         .IsRequired()
@@ -64,8 +66,6 @@ namespace Backend.Migrations
                         .HasColumnType("varchar(300)");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("DriverId");
 
                     b.ToTable("Rides");
                 });
@@ -78,10 +78,6 @@ namespace Backend.Migrations
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("CarColor")
-                        .HasMaxLength(50)
-                        .HasColumnType("varchar(50)");
-
                     b.Property<string>("CarMake")
                         .HasMaxLength(50)
                         .HasColumnType("varchar(50)");
@@ -89,6 +85,9 @@ namespace Backend.Migrations
                     b.Property<string>("CarModel")
                         .HasMaxLength(50)
                         .HasColumnType("varchar(50)");
+
+                    b.Property<int>("DriverStatus")
+                        .HasColumnType("int");
 
                     b.Property<string>("LicensePlate")
                         .HasMaxLength(20)
@@ -108,9 +107,6 @@ namespace Backend.Migrations
                         .HasColumnType("int");
 
                     b.Property<int>("UserId")
-                        .HasColumnType("int");
-
-                    b.Property<int>("UserStatus")
                         .HasColumnType("int");
 
                     b.HasKey("Id");
@@ -153,21 +149,6 @@ namespace Backend.Migrations
                             PhoneNumber = "+380967515075",
                             Role = 2
                         });
-                });
-
-            modelBuilder.Entity("Backend.Models.Ride", b =>
-                {
-                    b.HasOne("Backend.Models.UserProfile", "Driver")
-                        .WithMany("Rides")
-                        .HasForeignKey("DriverId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("Driver");
-                });
-
-            modelBuilder.Entity("Backend.Models.UserProfile", b =>
-                {
-                    b.Navigation("Rides");
                 });
 #pragma warning restore 612, 618
         }

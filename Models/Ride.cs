@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Backend.Models.Enums;
 
 namespace Backend.Models;
 
@@ -8,13 +9,14 @@ public class Ride
     [Key]
     public int Id { get; set; }
 
-    [Required]
-    [MaxLength(20)]
-    public string ClientPhone { get; set; } = string.Empty;
+    public int? DriverId { get; set; }
 
-    [Required]
-    [MaxLength(100)]
-    public string ClientName { get; set; } = string.Empty;
+    public UserProfile? Driver { get; set; }
+
+    public RideStatus Status { get; set; } = RideStatus.Created;
+
+    [Column(TypeName = "decimal(5,2)")]
+    public decimal? Rating { get; set; }
 
     [Required]
     [MaxLength(300)]
@@ -24,12 +26,17 @@ public class Ride
     [MaxLength(300)]
     public string ToAddress { get; set; } = string.Empty;
 
-    public DateTime StartTime { get; set; } = DateTime.UtcNow;
+    public DateTime? StartTime { get; set; }
 
     public DateTime? EndTime { get; set; }
 
-    public string? RouteJson { get; set; }
+    public List<RideRoutePoint> Route { get; set; } = [];
 
-    [Column(TypeName = "decimal(10,2)")]
-    public decimal Price { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+public class RideRoutePoint
+{
+    public decimal Lat { get; set; }
+    public decimal Lng { get; set; }
 }

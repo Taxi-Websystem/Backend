@@ -4,6 +4,7 @@ using Backend.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Backend.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260504151203_AddTripStatsAndRideDriverLink")]
+    partial class AddTripStatsAndRideDriverLink
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -30,10 +33,17 @@ namespace Backend.Migrations
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime(6)");
+                    b.Property<string>("ClientName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("varchar(100)");
 
-                    b.Property<int?>("DriverId")
+                    b.Property<string>("ClientPhone")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("varchar(20)");
+
+                    b.Property<int?>("DriverProfileId")
                         .HasColumnType("int");
 
                     b.Property<DateTime?>("EndTime")
@@ -44,19 +54,17 @@ namespace Backend.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("varchar(300)");
 
-                    b.Property<decimal?>("Rating")
-                        .HasPrecision(5, 2)
-                        .HasColumnType("decimal(5,2)");
+                    b.Property<decimal>("Price")
+                        .HasColumnType("decimal(10,2)");
 
-                    b.Property<string>("Route")
-                        .IsRequired()
+                    b.Property<decimal?>("Rating")
+                        .HasColumnType("decimal(3,2)");
+
+                    b.Property<string>("RouteJson")
                         .HasColumnType("longtext");
 
-                    b.Property<DateTime?>("StartTime")
+                    b.Property<DateTime>("StartTime")
                         .HasColumnType("datetime(6)");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("int");
 
                     b.Property<string>("ToAddress")
                         .IsRequired()
@@ -65,7 +73,7 @@ namespace Backend.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("DriverId");
+                    b.HasIndex("DriverProfileId");
 
                     b.ToTable("Rides");
                 });
@@ -77,6 +85,9 @@ namespace Backend.Migrations
                         .HasColumnType("int");
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<decimal?>("AverageRating")
+                        .HasColumnType("decimal(3,2)");
 
                     b.Property<string>("CarColor")
                         .HasMaxLength(50)
@@ -105,6 +116,9 @@ namespace Backend.Migrations
                         .HasColumnType("varchar(20)");
 
                     b.Property<int>("Role")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TripCount")
                         .HasColumnType("int");
 
                     b.Property<int>("UserId")
@@ -157,17 +171,12 @@ namespace Backend.Migrations
 
             modelBuilder.Entity("Backend.Models.Ride", b =>
                 {
-                    b.HasOne("Backend.Models.UserProfile", "Driver")
-                        .WithMany("Rides")
-                        .HasForeignKey("DriverId")
+                    b.HasOne("Backend.Models.UserProfile", "DriverProfile")
+                        .WithMany()
+                        .HasForeignKey("DriverProfileId")
                         .OnDelete(DeleteBehavior.SetNull);
 
-                    b.Navigation("Driver");
-                });
-
-            modelBuilder.Entity("Backend.Models.UserProfile", b =>
-                {
-                    b.Navigation("Rides");
+                    b.Navigation("DriverProfile");
                 });
 #pragma warning restore 612, 618
         }
