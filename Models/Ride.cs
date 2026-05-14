@@ -30,6 +30,12 @@ public class Ride
 
     public DateTime? EndTime { get; set; }
 
+    public decimal DistanceKm { get; set; }
+
+    public decimal Price { get; set; }
+
+    public decimal? DriverProfit { get; set; }
+
     public List<RideRoutePoint> Route { get; set; } = [];
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

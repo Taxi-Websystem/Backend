@@ -59,7 +59,8 @@ public class PresenceController : ControllerBase
         return Ok(new PresenceSettingsDto(
             settings.IsAutoStatusEnabled,
             profile.UserStatus,
-            !settings.IsAutoStatusEnabled));
+            !settings.IsAutoStatusEnabled,
+            profile.Id));
     }
 
     [HttpPut("settings")]
@@ -102,7 +103,8 @@ public class PresenceController : ControllerBase
         return Ok(new PresenceSettingsDto(
             settings.IsAutoStatusEnabled,
             profile.UserStatus,
-            !settings.IsAutoStatusEnabled));
+            !settings.IsAutoStatusEnabled,
+            profile.Id));
     }
 
     [HttpPost("status")]
@@ -149,7 +151,8 @@ public class PresenceController : ControllerBase
         return Ok(new PresenceSettingsDto(
             settings.IsAutoStatusEnabled,
             profile.UserStatus,
-            !settings.IsAutoStatusEnabled));
+            !settings.IsAutoStatusEnabled,
+            profile.Id));
     }
 
     [HttpPost("logout")]
@@ -189,6 +192,6 @@ public class PresenceController : ControllerBase
         => _presenceHub.Clients.All.SendAsync("PresenceChanged", new { userId, status = status.ToString() });
 }
 
-public record PresenceSettingsDto(bool IsAutoStatusEnabled, UserStatus CurrentStatus, bool IsManualControlAllowed);
+public record PresenceSettingsDto(bool IsAutoStatusEnabled, UserStatus CurrentStatus, bool IsManualControlAllowed, int ProfileId);
 public record UpdatePresenceSettingsRequest(bool IsAutoStatusEnabled);
 public record SetPresenceStatusRequest(UserStatus Status);

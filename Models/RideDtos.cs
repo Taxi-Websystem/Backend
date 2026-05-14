@@ -15,6 +15,9 @@ public class RideListItemDto
     public DateTime? StartTime { get; set; }
     public DateTime? EndTime { get; set; }
     public DateTime CreatedAt { get; set; }
+    public decimal DistanceKm { get; set; }
+    public decimal Price { get; set; }
+    public decimal? DriverProfit { get; set; }
 }
 
 public class RideUpsertDto
@@ -26,4 +29,5 @@ public class RideUpsertDto
     public string ToAddress { get; set; } = string.Empty;
     public DateTime? StartTime { get; set; }
     public DateTime? EndTime { get; set; }
+    public decimal DistanceKm { get; set; }
 }

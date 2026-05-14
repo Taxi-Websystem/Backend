@@ -15,6 +15,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<UserWhitelist> UserWhitelists => Set<UserWhitelist>();
     public DbSet<UserProfile> UserProfiles => Set<UserProfile>();
     public DbSet<Ride> Rides => Set<Ride>();
+    public DbSet<SystemSettings> SystemSettings => Set<SystemSettings>();
     public DbSet<UserSettings> UserSettings => Set<UserSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -60,6 +61,31 @@ public class ApplicationDbContext : DbContext
         modelBuilder.Entity<Ride>()
             .Property(r => r.Rating)
             .HasPrecision(5, 2);
+        modelBuilder.Entity<Ride>()
+            .Property(r => r.DistanceKm)
+            .HasPrecision(12, 2);
+        modelBuilder.Entity<Ride>()
+            .Property(r => r.Price)
+            .HasPrecision(12, 2);
+        modelBuilder.Entity<Ride>()
+            .Property(r => r.DriverProfit)
+            .HasPrecision(12, 2);
+
+        modelBuilder.Entity<SystemSettings>(e =>
+        {
+            e.Property(s => s.BaseFare).HasPrecision(12, 2);
+            e.Property(s => s.CostPerKm).HasPrecision(12, 2);
+            e.Property(s => s.PlatformFixedFee).HasPrecision(12, 2);
+            e.Property(s => s.PlatformFeePercentage).HasPrecision(6, 4);
+            e.HasData(new SystemSettings
+            {
+                Id = 1,
+                BaseFare = 50m,
+                CostPerKm = 15m,
+                PlatformFixedFee = 10m,
+                PlatformFeePercentage = 0.10m
+            });
+        });
 
         var routeProperty = modelBuilder.Entity<Ride>()
             .Property(r => r.Route);

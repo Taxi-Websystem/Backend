@@ -2,6 +2,7 @@ using Backend.Data;
 using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -17,11 +18,16 @@ public class RidesController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
     private readonly IHubContext<PresenceHub> _presenceHub;
+    private readonly IRidePricingService _ridePricing;
 
-    public RidesController(ApplicationDbContext context, IHubContext<PresenceHub> presenceHub)
+    public RidesController(
+        ApplicationDbContext context,
+        IHubContext<PresenceHub> presenceHub,
+        IRidePricingService ridePricing)
     {
         _context = context;
         _presenceHub = presenceHub;
+        _ridePricing = ridePricing;
     }
 
     [HttpGet]
@@ -43,7 +49,10 @@ public class RidesController : ControllerBase
                 ToAddress = r.ToAddress,
                 StartTime = r.StartTime,
                 EndTime = r.EndTime,
-                CreatedAt = r.CreatedAt
+                CreatedAt = r.CreatedAt,
+                DistanceKm = r.DistanceKm,
+                Price = r.Price,
+                DriverProfit = r.DriverProfit
             })
             .ToListAsync();
 
@@ -69,7 +78,10 @@ public class RidesController : ControllerBase
                 ToAddress = r.ToAddress,
                 StartTime = r.StartTime,
                 EndTime = r.EndTime,
-                CreatedAt = r.CreatedAt
+                CreatedAt = r.CreatedAt,
+                DistanceKm = r.DistanceKm,
+                Price = r.Price,
+                DriverProfit = r.DriverProfit
             })
             .FirstOrDefaultAsync();
         if (ride is null) return NotFound();
@@ -88,6 +100,11 @@ public class RidesController : ControllerBase
         if (validationError is not null)
             return BadRequest(new { message = validationError });
 
+        if (dto.DistanceKm < 0)
+            return BadRequest(new { message = "Відстань не може бути від’ємною." });
+
+        var settings = await _ridePricing.GetSettingsAsync();
+
         var ride = new Ride
         {
             DriverId = dto.DriverId,
@@ -100,6 +117,10 @@ public class RidesController : ControllerBase
             CreatedAt = DateTime.UtcNow,
             Route = []
         };
+
+        NormalizeCompletedRideTimestamps(ride);
+
+        _ridePricing.ApplyFinancials(ride, settings, dto.DistanceKm, dto.Status);
 
         _context.Rides.Add(ride);
         await _context.SaveChangesAsync();
@@ -114,7 +135,10 @@ public class RidesController : ControllerBase
             ToAddress = ride.ToAddress,
             StartTime = ride.StartTime,
             EndTime = ride.EndTime,
-            CreatedAt = ride.CreatedAt
+            CreatedAt = ride.CreatedAt,
+            DistanceKm = ride.DistanceKm,
+            Price = ride.Price,
+            DriverProfit = ride.DriverProfit
         });
     }
 
@@ -134,6 +158,11 @@ public class RidesController : ControllerBase
         if (validationError is not null)
             return BadRequest(new { message = validationError });
 
+        if (dto.DistanceKm < 0)
+            return BadRequest(new { message = "Відстань не може бути від’ємною." });
+
+        var settings = await _ridePricing.GetSettingsAsync();
+
         ride.DriverId = dto.DriverId;
         ride.Status = dto.Status;
         ride.Rating = dto.Rating;
@@ -141,6 +170,10 @@ public class RidesController : ControllerBase
         ride.ToAddress = dto.ToAddress.Trim();
         ride.StartTime = dto.StartTime;
         ride.EndTime = dto.EndTime;
+
+        NormalizeCompletedRideTimestamps(ride);
+
+        _ridePricing.ApplyFinancials(ride, settings, dto.DistanceKm, dto.Status);
 
         try
         {
@@ -191,5 +224,21 @@ public class RidesController : ControllerBase
             return "Оцінка поїздки має бути від 1 до 5.";
 
         return null;
+    }
+
+    /// <summary>
+    /// Завершена поїздка без часу завершення не потрапляє в аналітику (фільтр по EndTime).
+    /// Якщо кінець не вказано — ставимо UTC «зараз», початок — як кінець, якщо теж порожній.
+    /// </summary>
+    private static void NormalizeCompletedRideTimestamps(Ride ride)
+    {
+        if (ride.Status != RideStatus.Completed)
+            return;
+
+        if (!ride.EndTime.HasValue)
+            ride.EndTime = DateTime.UtcNow;
+
+        if (!ride.StartTime.HasValue)
+            ride.StartTime = ride.EndTime!.Value;
     }
 }
