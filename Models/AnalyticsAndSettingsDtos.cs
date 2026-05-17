@@ -42,4 +42,5 @@ public class DriverAnalyticsResponseDto
     public List<DriverAnalyticsChartPointDto> ChartData { get; set; } = [];
     /// <summary>"hour" for short ranges (24h, вчора), "day" for longer periods.</summary>
     public string ChartBucket { get; set; } = "day";
+    public List<RideMapSummaryDto> RidesForMap { get; set; } = [];
 }

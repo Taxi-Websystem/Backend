@@ -26,7 +26,21 @@ public class Ride
     [MaxLength(300)]
     public string ToAddress { get; set; } = string.Empty;
 
+    [Column(TypeName = "decimal(9,6)")]
+    public decimal? FromLatitude { get; set; }
+
+    [Column(TypeName = "decimal(9,6)")]
+    public decimal? FromLongitude { get; set; }
+
+    [Column(TypeName = "decimal(9,6)")]
+    public decimal? ToLatitude { get; set; }
+
+    [Column(TypeName = "decimal(9,6)")]
+    public decimal? ToLongitude { get; set; }
+
     public DateTime? StartTime { get; set; }
+
+    public DateTime? AcceptedAt { get; set; }
 
     public DateTime? EndTime { get; set; }
 
@@ -36,13 +50,7 @@ public class Ride
 
     public decimal? DriverProfit { get; set; }
 
-    public List<RideRoutePoint> Route { get; set; } = [];
+    public ICollection<RideRoutePoint> RoutePoints { get; set; } = new List<RideRoutePoint>();
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-}
-
-public class RideRoutePoint
-{
-    public decimal Lat { get; set; }
-    public decimal Lng { get; set; }
 }

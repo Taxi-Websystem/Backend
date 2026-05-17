@@ -15,4 +15,6 @@ public class SystemSettings
 
     /// <summary>Fraction, e.g. 0.10 for 10%.</summary>
     public decimal PlatformFeePercentage { get; set; }
+
+    public bool IsRouteOptimizationEnabled { get; set; }
 }

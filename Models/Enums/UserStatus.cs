@@ -2,7 +2,8 @@ namespace Backend.Models.Enums;
 
 public enum UserStatus
 {
-    Offline,
-    Online,
-    InRide
+    Offline = 0,
+    Online = 1,
+    InRide = 2,
+    Break = 3
 }

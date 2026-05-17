@@ -40,7 +40,7 @@ public class AnalyticsController : ControllerBase
         if (authError is not null)
             return authError;
 
-        var rides = await _context.Rides
+        var completedRides = await _context.Rides
             .AsNoTracking()
             .Where(r =>
                 r.DriverId == driverId
@@ -48,15 +48,28 @@ public class AnalyticsController : ControllerBase
                 && r.EndTime.HasValue
                 && r.EndTime >= startUtc
                 && r.EndTime <= endUtc)
-            .Select(r => new RideForAnalytics
+            .OrderByDescending(r => r.EndTime)
+            .Select(r => new
             {
+                r.Id,
+                r.FromAddress,
+                r.ToAddress,
                 EndTime = r.EndTime!.Value,
-                StartTime = r.StartTime,
-                DriverProfit = r.DriverProfit,
-                Rating = r.Rating,
-                DistanceKm = r.DistanceKm
+                r.StartTime,
+                r.DriverProfit,
+                r.Rating,
+                r.DistanceKm
             })
             .ToListAsync();
+
+        var rides = completedRides.Select(r => new RideForAnalytics
+        {
+            EndTime = r.EndTime,
+            StartTime = r.StartTime,
+            DriverProfit = r.DriverProfit,
+            Rating = r.Rating,
+            DistanceKm = r.DistanceKm
+        }).ToList();
 
         var totalProfit = rides.Sum(r => r.DriverProfit ?? 0m);
         var totalRides = rides.Count;
@@ -81,7 +94,51 @@ public class AnalyticsController : ControllerBase
                 AverageRideRating = averageRideRating
             },
             ChartData = chartGroups,
-            ChartBucket = chartBucket
+            ChartBucket = chartBucket,
+            RidesForMap = completedRides.Select(r => new RideMapSummaryDto
+            {
+                RideId = r.Id,
+                FromAddress = r.FromAddress,
+                ToAddress = r.ToAddress,
+                EndTime = DateTime.SpecifyKind(r.EndTime, DateTimeKind.Utc)
+            }).ToList()
+        });
+    }
+
+    [HttpGet("driver/{driverId:int}/rides/{rideId:int}/map")]
+    public async Task<IActionResult> GetDriverRideMap(int driverId, int rideId)
+    {
+        var authError = await EnsureCanAccessDriverAnalyticsAsync(driverId);
+        if (authError is not null)
+            return authError;
+
+        var ride = await _context.Rides
+            .AsNoTracking()
+            .Include(r => r.RoutePoints)
+            .FirstOrDefaultAsync(r => r.Id == rideId && r.DriverId == driverId);
+
+        if (ride is null)
+            return NotFound(new { message = "Поїздку не знайдено." });
+
+        return Ok(new RideMapDto
+        {
+            Id = ride.Id,
+            FromAddress = ride.FromAddress,
+            ToAddress = ride.ToAddress,
+            FromLatitude = ride.FromLatitude,
+            FromLongitude = ride.FromLongitude,
+            ToLatitude = ride.ToLatitude,
+            ToLongitude = ride.ToLongitude,
+            DistanceKm = ride.DistanceKm,
+            RoutePoints = ride.RoutePoints
+                .OrderBy(p => p.RecordedAt)
+                .Select(p => new RoutePointDto
+                {
+                    Latitude = p.Latitude,
+                    Longitude = p.Longitude,
+                    RecordedAt = p.RecordedAt
+                })
+                .ToList()
         });
     }
 

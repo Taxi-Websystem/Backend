@@ -1,6 +1,6 @@
 using Backend.Data;
 using Backend.Models;
-using Backend.Models.Enums;
+using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -26,35 +26,32 @@ public class SettingsController : ControllerBase
         if (row is null)
             return NotFound(new { message = "Системні тарифи не знайдено." });
 
-        return Ok(new FinancialSettingsDto
-        {
-            BaseFare = row.BaseFare,
-            CostPerKm = row.CostPerKm,
-            PlatformFixedFee = row.PlatformFixedFee,
-            PlatformFeePercentage = row.PlatformFeePercentage
-        });
+        return Ok(MapToDto(row));
     }
 
     [HttpPut]
     [Authorize(Roles = "SuperAdmin")]
     public async Task<IActionResult> Put([FromBody] UpdateFinancialSettingsDto dto)
     {
-        if (dto.BaseFare < 0 || dto.CostPerKm < 0 || dto.PlatformFixedFee < 0)
-            return BadRequest(new { message = "Тарифи не можуть бути від’ємними." });
-
-        if (dto.PlatformFeePercentage < 0 || dto.PlatformFeePercentage > 1)
-            return BadRequest(new { message = "Комісія має бути від 0 до 1 (наприклад 0.10 для 10%)." });
+        var validationError = SystemSettingsValidation.ValidateUpdate(dto);
+        if (validationError is not null)
+            return BadRequest(new { message = validationError });
 
         var row = await _context.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
         if (row is null)
             return NotFound(new { message = "Системні тарифи не знайдено." });
 
-        row.BaseFare = decimal.Round(dto.BaseFare, 2, MidpointRounding.AwayFromZero);
-        row.CostPerKm = decimal.Round(dto.CostPerKm, 2, MidpointRounding.AwayFromZero);
-        row.PlatformFixedFee = decimal.Round(dto.PlatformFixedFee, 2, MidpointRounding.AwayFromZero);
-        row.PlatformFeePercentage = decimal.Round(dto.PlatformFeePercentage, 4, MidpointRounding.AwayFromZero);
+        SystemSettingsValidation.ApplyRoundedValues(row, dto);
 
         await _context.SaveChangesAsync();
         return NoContent();
     }
+
+    private static FinancialSettingsDto MapToDto(SystemSettings row) => new()
+    {
+        BaseFare = row.BaseFare,
+        CostPerKm = row.CostPerKm,
+        PlatformFixedFee = row.PlatformFixedFee,
+        PlatformFeePercentage = row.PlatformFeePercentage
+    };
 }

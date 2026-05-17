@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Backend.Data;
 using Backend.Hubs;
+using Backend.Models;
 using Backend.Models.Enums;
 using Backend.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -56,11 +57,7 @@ public class PresenceController : ControllerBase
             await BroadcastStatusChanged(userId.Value, UserStatus.Online);
         }
 
-        return Ok(new PresenceSettingsDto(
-            settings.IsAutoStatusEnabled,
-            profile.UserStatus,
-            !settings.IsAutoStatusEnabled,
-            profile.Id));
+        return Ok(MapPresenceDto(settings, profile));
     }
 
     [HttpPut("settings")]
@@ -81,30 +78,46 @@ public class PresenceController : ControllerBase
         if (profile.Role != UserRole.Driver)
         {
             return StatusCode(StatusCodes.Status403Forbidden,
-                new { message = "Лише водій може змінювати автостатус." });
+                new { message = "Лише водій може змінювати ці налаштування." });
+        }
+
+        if (request.IsAutoStatusEnabled is null
+            && request.IsRouteOptimizationEnabled is null
+            && request.IsAutoAcceptOrdersEnabled is null)
+        {
+            return BadRequest(new { message = "Не вказано налаштування для оновлення." });
         }
 
         var settings = await _userSettingsService.GetOrCreateAsync(userId.Value);
-        settings.IsAutoStatusEnabled = request.IsAutoStatusEnabled;
 
-        if (settings.IsAutoStatusEnabled
-            && profile.UserStatus == UserStatus.Offline
-            && PresenceHub.HasActiveConnections(userId.Value))
+        if (request.IsAutoStatusEnabled is bool autoStatus)
         {
-            profile.UserStatus = UserStatus.Online;
-            await _context.SaveChangesAsync();
-            await BroadcastStatusChanged(userId.Value, UserStatus.Online);
-        }
-        else
-        {
-            await _context.SaveChangesAsync();
+            settings.IsAutoStatusEnabled = autoStatus;
+
+            if (settings.IsAutoStatusEnabled
+                && profile.UserStatus == UserStatus.Offline
+                && PresenceHub.HasActiveConnections(userId.Value))
+            {
+                profile.UserStatus = UserStatus.Online;
+                await _context.SaveChangesAsync();
+                await BroadcastStatusChanged(userId.Value, UserStatus.Online);
+                return Ok(MapPresenceDto(settings, profile));
+            }
         }
 
-        return Ok(new PresenceSettingsDto(
-            settings.IsAutoStatusEnabled,
-            profile.UserStatus,
-            !settings.IsAutoStatusEnabled,
-            profile.Id));
+        if (request.IsRouteOptimizationEnabled is bool routeOptimization)
+        {
+            settings.IsRouteOptimizationEnabled = routeOptimization;
+        }
+
+        if (request.IsAutoAcceptOrdersEnabled is bool autoAcceptOrders)
+        {
+            settings.IsAutoAcceptOrdersEnabled = autoAcceptOrders;
+        }
+
+        await _context.SaveChangesAsync();
+
+        return Ok(MapPresenceDto(settings, profile));
     }
 
     [HttpPost("status")]
@@ -128,31 +141,88 @@ public class PresenceController : ControllerBase
                 new { message = "Лише водій може керувати статусом вручну." });
         }
 
+        if (profile.UserStatus == UserStatus.InRide)
+        {
+            var hasActiveRide = await _context.Rides.AnyAsync(r =>
+                r.DriverId == profile.Id && r.Status == RideStatus.InRide);
+
+            if (hasActiveRide)
+            {
+                return BadRequest(new { message = "Неможливо змінити статус під час активної поїздки." });
+            }
+
+            profile.UserStatus = UserStatus.Online;
+        }
+
         var settings = await _userSettingsService.GetOrCreateAsync(userId.Value);
         if (settings.IsAutoStatusEnabled)
         {
-            return BadRequest(new { message = "Ручне керування доступне лише коли автостатус вимкнено." });
+            if (request.Status == UserStatus.Offline)
+            {
+                return BadRequest(new { message = "Офлайн при увімкненому автостатусі задається автоматично." });
+            }
+
+            if (request.Status == UserStatus.Break)
+            {
+                if (profile.UserStatus == UserStatus.Break)
+                {
+                    return BadRequest(new { message = "Ви вже на перерві." });
+                }
+
+                var hasAssignedRide = await _context.Rides.AnyAsync(r =>
+                    r.DriverId == profile.Id
+                    && (r.Status == RideStatus.Accepted || r.Status == RideStatus.InRide));
+
+                if (hasAssignedRide)
+                {
+                    return BadRequest(new { message = "Неможливо взяти перерву, поки є активне замовлення." });
+                }
+
+                var canTakeBreak =
+                    profile.UserStatus == UserStatus.Online
+                    || (profile.UserStatus == UserStatus.Offline
+                        && PresenceHub.HasActiveConnections(userId.Value));
+
+                if (!canTakeBreak)
+                {
+                    return BadRequest(new { message = "Перерву можна взяти лише у статусі «Онлайн»." });
+                }
+            }
+            else if (request.Status == UserStatus.Online)
+            {
+                if (profile.UserStatus != UserStatus.Break)
+                {
+                    return BadRequest(new { message = "При автостатусі можна лише завершити перерву." });
+                }
+            }
+            else
+            {
+                return BadRequest(new { message = "При автостатусі можна лише взяти або завершити перерву." });
+            }
         }
 
-        if (request.Status is not UserStatus.Online and not UserStatus.Offline)
+        if (request.Status is not UserStatus.Online and not UserStatus.Offline and not UserStatus.Break)
         {
-            return BadRequest(new { message = "Ручне перемикання дозволене лише між Online/Offline." });
+            return BadRequest(new { message = "Ручне перемикання дозволене лише між Online, Offline та Break." });
         }
 
-        if (profile.UserStatus == UserStatus.InRide)
+        if (request.Status == UserStatus.Break)
         {
-            return BadRequest(new { message = "Неможливо змінити статус під час активної поїздки." });
+            var hasAssignedRide = await _context.Rides.AnyAsync(r =>
+                r.DriverId == profile.Id
+                && (r.Status == RideStatus.Accepted || r.Status == RideStatus.InRide));
+
+            if (hasAssignedRide)
+            {
+                return BadRequest(new { message = "Неможливо взяти перерву, поки є активне замовлення." });
+            }
         }
 
         profile.UserStatus = request.Status;
         await _context.SaveChangesAsync();
         await BroadcastStatusChanged(userId.Value, profile.UserStatus);
 
-        return Ok(new PresenceSettingsDto(
-            settings.IsAutoStatusEnabled,
-            profile.UserStatus,
-            !settings.IsAutoStatusEnabled,
-            profile.Id));
+        return Ok(MapPresenceDto(settings, profile));
     }
 
     [HttpPost("logout")]
@@ -171,8 +241,7 @@ public class PresenceController : ControllerBase
             return NotFound(new { message = "Профіль не знайдено." });
         }
 
-        if (profile.UserStatus != UserStatus.InRide
-            && profile.UserStatus != UserStatus.Offline)
+        if (profile.UserStatus is UserStatus.Online or UserStatus.Break)
         {
             profile.UserStatus = UserStatus.Offline;
             await _context.SaveChangesAsync();
@@ -190,8 +259,27 @@ public class PresenceController : ControllerBase
 
     private Task BroadcastStatusChanged(int userId, UserStatus status)
         => _presenceHub.Clients.All.SendAsync("PresenceChanged", new { userId, status = status.ToString() });
+
+    private static PresenceSettingsDto MapPresenceDto(UserSettings settings, UserProfile profile)
+        => new(
+            settings.IsAutoStatusEnabled,
+            profile.UserStatus,
+            !settings.IsAutoStatusEnabled,
+            profile.Id,
+            settings.IsRouteOptimizationEnabled,
+            settings.IsAutoAcceptOrdersEnabled);
 }
 
-public record PresenceSettingsDto(bool IsAutoStatusEnabled, UserStatus CurrentStatus, bool IsManualControlAllowed, int ProfileId);
-public record UpdatePresenceSettingsRequest(bool IsAutoStatusEnabled);
+public record PresenceSettingsDto(
+    bool IsAutoStatusEnabled,
+    UserStatus CurrentStatus,
+    bool IsManualControlAllowed,
+    int ProfileId,
+    bool IsRouteOptimizationEnabled,
+    bool IsAutoAcceptOrdersEnabled);
+
+public record UpdatePresenceSettingsRequest(
+    bool? IsAutoStatusEnabled = null,
+    bool? IsRouteOptimizationEnabled = null,
+    bool? IsAutoAcceptOrdersEnabled = null);
 public record SetPresenceStatusRequest(UserStatus Status);

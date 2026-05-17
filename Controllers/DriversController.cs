@@ -28,35 +28,53 @@ public class DriversController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<DriverListItemDto>>> GetAll()
     {
-        var driverRows = await (from profile in _context.UserProfiles
-                                join whitelist in _context.UserWhitelists
-                                    on profile.UserId equals whitelist.Id
-                                where profile.Role == UserRole.Driver
-                                      && whitelist.Role == UserRole.Driver
-                                      && whitelist.IsActive
-                                      && !string.IsNullOrWhiteSpace(profile.Name)
-                                      && profile.Name != profile.PhoneNumber
-                                join ride in _context.Rides.Where(r => r.Status == RideStatus.Completed)
-                                    on profile.Id equals ride.DriverId into ridesGroup
-                                select new DriverListItemDto
-                                {
-                                    Id = profile.Id,
-                                    UserId = profile.UserId,
-                                    PhoneNumber = profile.PhoneNumber,
-                                    Name = profile.Name,
-                                    CarMake = profile.CarMake,
-                                    CarModel = profile.CarModel,
-                                    CarColor = profile.CarColor,
-                                    LicensePlate = profile.LicensePlate,
-                                    Role = profile.Role,
-                                    UserStatus = profile.UserStatus,
-                                    TripCount = ridesGroup.Count(),
-                                    AverageRating = ridesGroup
-                                        .Where(r => r.Rating.HasValue)
-                                        .Select(r => r.Rating)
-                                        .Average()
-                                })
+        var rawRows = await (from profile in _context.UserProfiles
+                             join whitelist in _context.UserWhitelists
+                                 on profile.UserId equals whitelist.Id
+                             where profile.Role == UserRole.Driver
+                                   && whitelist.Role == UserRole.Driver
+                                   && whitelist.IsActive
+                                   && !string.IsNullOrWhiteSpace(profile.Name)
+                                   && profile.Name != profile.PhoneNumber
+                             join ride in _context.Rides.Where(r => r.Status == RideStatus.Completed)
+                                 on profile.Id equals ride.DriverId into ridesGroup
+                             select new
+                             {
+                                 profile.Id,
+                                 profile.UserId,
+                                 profile.PhoneNumber,
+                                 profile.Name,
+                                 profile.CarMake,
+                                 profile.CarModel,
+                                 profile.CarColor,
+                                 profile.LicensePlate,
+                                 profile.Role,
+                                 profile.UserStatus,
+                                 TripCount = ridesGroup.Count(),
+                                 AverageRatingRaw = ridesGroup
+                                     .Where(r => r.Rating.HasValue)
+                                     .Select(r => r.Rating)
+                                     .Average()
+                             })
             .ToListAsync();
+
+        var driverRows = rawRows.Select(row => new DriverListItemDto
+        {
+            Id = row.Id,
+            UserId = row.UserId,
+            PhoneNumber = row.PhoneNumber,
+            Name = row.Name,
+            CarMake = row.CarMake,
+            CarModel = row.CarModel,
+            CarColor = row.CarColor,
+            LicensePlate = row.LicensePlate,
+            Role = row.Role,
+            UserStatus = row.UserStatus,
+            TripCount = row.TripCount,
+            AverageRating = row.AverageRatingRaw.HasValue
+                ? decimal.Round(row.AverageRatingRaw.Value, 2, MidpointRounding.AwayFromZero)
+                : null
+        }).ToList();
 
         return driverRows;
     }
