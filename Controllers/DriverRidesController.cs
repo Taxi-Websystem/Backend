@@ -99,7 +99,8 @@ public class DriverRidesController : ControllerBase
         ride.DriverId = profile.Id;
         ride.Status = RideStatus.Accepted;
         ride.AcceptedAt = DateTime.UtcNow;
-        _ridePricing.ApplyFinancials(ride, settings, ride.DistanceKm, RideStatus.Completed);
+        if (!ride.DriverProfit.HasValue)
+            _ridePricing.ApplyFinancials(ride, settings, ride.DistanceKm, RideStatus.Accepted);
 
         await _context.SaveChangesAsync();
         await BroadcastDashboardDataChanged("rides", "accept", profile.UserId);
@@ -190,7 +191,8 @@ public class DriverRidesController : ControllerBase
         if (!ride.StartTime.HasValue)
             ride.StartTime = ride.EndTime;
 
-        _ridePricing.ApplyFinancials(ride, settings, ride.DistanceKm, RideStatus.Completed);
+        if (!ride.DriverProfit.HasValue)
+            _ridePricing.ApplyFinancials(ride, settings, ride.DistanceKm, RideStatus.Completed);
         profile.UserStatus = UserStatus.Online;
 
         await _context.SaveChangesAsync();
@@ -248,7 +250,7 @@ public class DriverRidesController : ControllerBase
             FromAddress = ride.FromAddress,
             ToAddress = ride.ToAddress,
             DistanceKm = ride.DistanceKm,
-            DriverProfit = EstimateDriverProfit(ride.DistanceKm, settings)
+            DriverProfit = ride.DriverProfit ?? EstimateDriverProfit(ride.DistanceKm, settings)
         };
 
     private static decimal? EstimateDriverProfit(decimal distanceKm, SystemSettings settings)

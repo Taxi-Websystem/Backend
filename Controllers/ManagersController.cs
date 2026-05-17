@@ -3,6 +3,7 @@ using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
 using Backend.Services;
+using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
@@ -97,9 +98,9 @@ public class ManagersController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(new { message = "Ім'я обов'язкове." });
 
-        var phone = NormalizePhone(request.PhoneNumber);
+        var phone = PhoneNumberValidation.Normalize(request.PhoneNumber);
         if (phone is null)
-            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
 
         var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.PhoneNumber == phone);
@@ -130,7 +131,13 @@ public class ManagersController : ControllerBase
         }
 
         if (await _context.UserProfiles.AnyAsync(p => p.UserId == whitelistEntry.Id))
-            return BadRequest(new { message = "Профіль для цього номера вже існує." });
+        {
+            return BadRequest(new
+            {
+                message = PhoneNumberValidation.DuplicateMessage,
+                code = PhoneNumberValidation.PhoneTakenCode
+            });
+        }
 
         var manager = new UserProfile
         {
@@ -219,9 +226,19 @@ public class ManagersController : ControllerBase
 
         if (isSuperAdminActor && !string.IsNullOrWhiteSpace(request.PhoneNumber))
         {
-            var normalizedPhone = NormalizePhone(request.PhoneNumber);
+            var normalizedPhone = PhoneNumberValidation.Normalize(request.PhoneNumber);
             if (normalizedPhone is null)
-                return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
+
+            if (normalizedPhone != whitelistEntry.PhoneNumber
+                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, normalizedPhone, whitelistEntry.Id))
+            {
+                return BadRequest(new
+                {
+                    message = PhoneNumberValidation.DuplicateMessage,
+                    code = PhoneNumberValidation.PhoneTakenCode
+                });
+            }
 
             whitelistEntry.PhoneNumber = normalizedPhone;
             existing.PhoneNumber = normalizedPhone;
@@ -289,19 +306,6 @@ public class ManagersController : ControllerBase
         return parsedId;
     }
 
-    private static string? NormalizePhone(string phone)
-    {
-        if (string.IsNullOrWhiteSpace(phone))
-            return null;
-
-        var normalized = phone.Trim();
-        if (!normalized.StartsWith("+380"))
-            return null;
-
-        return normalized.Length == 13 && normalized.Skip(1).All(char.IsDigit)
-            ? normalized
-            : null;
-    }
 }
 
 public class ManagerListItemDto

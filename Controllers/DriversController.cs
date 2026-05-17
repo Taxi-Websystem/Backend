@@ -99,9 +99,9 @@ public class DriversController : ControllerBase
     public async Task<ActionResult<UserProfile>> Create(UserProfile driver)
     {
         driver.Role = UserRole.Driver;
-        var phone = NormalizePhone(driver.PhoneNumber);
+        var phone = PhoneNumberValidation.Normalize(driver.PhoneNumber);
         if (phone is null)
-            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
 
         var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.PhoneNumber == phone);
@@ -131,7 +131,13 @@ public class DriversController : ControllerBase
         }
 
         if (await _context.UserProfiles.AnyAsync(p => p.UserId == whitelistEntry.Id))
-            return BadRequest(new { message = "Профіль для цього номера вже існує." });
+        {
+            return BadRequest(new
+            {
+                message = PhoneNumberValidation.DuplicateMessage,
+                code = PhoneNumberValidation.PhoneTakenCode
+            });
+        }
 
         if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarMake))
             return BadRequest(new { message = "Марка авто: лише латинські літери, цифри, пробіл та дефіс." });
@@ -161,9 +167,9 @@ public class DriversController : ControllerBase
         if (existingDriver is null || existingDriver.Role != UserRole.Driver)
             return NotFound();
 
-        var normalizedPhone = NormalizePhone(driver.PhoneNumber);
+        var normalizedPhone = PhoneNumberValidation.Normalize(driver.PhoneNumber);
         if (normalizedPhone is null)
-            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
 
         var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.Id == existingDriver.UserId);
@@ -197,7 +203,13 @@ public class DriversController : ControllerBase
             var phoneTaken = await _context.UserWhitelists
                 .AnyAsync(w => w.PhoneNumber == normalizedPhone && w.Id != whitelistEntry.Id);
             if (phoneTaken)
-                return BadRequest(new { message = "Номер телефону вже зайнятий." });
+            {
+                return BadRequest(new
+                {
+                    message = PhoneNumberValidation.DuplicateMessage,
+                    code = PhoneNumberValidation.PhoneTakenCode
+                });
+            }
         }
 
         if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarMake))
@@ -263,20 +275,6 @@ public class DriversController : ControllerBase
     {
         var role = User.FindFirstValue(ClaimTypes.Role);
         return Enum.TryParse<UserRole>(role, out var parsed) ? parsed : UserRole.Driver;
-    }
-
-    private static string? NormalizePhone(string phone)
-    {
-        if (string.IsNullOrWhiteSpace(phone))
-            return null;
-
-        var normalized = phone.Trim();
-        if (!normalized.StartsWith("+380"))
-            return null;
-
-        return normalized.Length == 13 && normalized.Skip(1).All(char.IsDigit)
-            ? normalized
-            : null;
     }
 
 }
