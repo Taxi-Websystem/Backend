@@ -1,11 +1,12 @@
+using System.Globalization;
+using System.Security.Claims;
+
 using Backend.Data;
 using Backend.Models;
 using Backend.Models.Enums;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Globalization;
-using System.Security.Claims;
 
 namespace Backend.Controllers;
 
@@ -33,68 +34,37 @@ public class AnalyticsController : ControllerBase
         if (startDate > endDate)
             return BadRequest(new { message = "startDate не може бути пізніше за endDate." });
 
-        var startUtc = startDate.Kind == DateTimeKind.Utc ? startDate : startDate.ToUniversalTime();
-        var endUtc = endDate.Kind == DateTimeKind.Utc ? endDate : endDate.ToUniversalTime();
+        var startUtc = ToUtc(startDate);
+        var endUtc = ToUtc(endDate);
 
         var authError = await EnsureCanAccessDriverAnalyticsAsync(driverId);
         if (authError is not null)
             return authError;
 
-        var completedRides = await _context.Rides
-            .AsNoTracking()
-            .Where(r =>
-                r.DriverId == driverId
-                && r.Status == RideStatus.Completed
-                && r.EndTime.HasValue
-                && r.EndTime >= startUtc
-                && r.EndTime <= endUtc)
-            .OrderByDescending(r => r.EndTime)
-            .Select(r => new
+        var completedRides = await QueryCompletedRidesForDriverAsync(driverId, startUtc, endUtc);
+
+        var rides = completedRides
+            .Select(r => new RideForAnalytics
             {
-                r.Id,
-                r.FromAddress,
-                r.ToAddress,
-                EndTime = r.EndTime!.Value,
-                r.StartTime,
-                r.DriverProfit,
-                r.Rating,
-                r.DistanceKm
+                EndTime = r.EndTime,
+                StartTime = r.StartTime,
+                DriverProfit = r.DriverProfit,
+                Rating = r.Rating,
+                DistanceKm = r.DistanceKm
             })
-            .ToListAsync();
-
-        var rides = completedRides.Select(r => new RideForAnalytics
-        {
-            EndTime = r.EndTime,
-            StartTime = r.StartTime,
-            DriverProfit = r.DriverProfit,
-            Rating = r.Rating,
-            DistanceKm = r.DistanceKm
-        }).ToList();
-
-        var totalProfit = rides.Sum(r => r.DriverProfit ?? 0m);
-        var totalRides = rides.Count;
-        var rated = rides.Where(r => r.Rating.HasValue).ToList();
-        double? averageRideRating = rated.Count == 0
-            ? null
-            : Math.Round(rated.Average(r => (double)r.Rating!.Value), 2, MidpointRounding.AwayFromZero);
+            .ToList();
 
         var spanHours = (endUtc - startUtc).TotalHours;
         var useHourlyBuckets = spanHours <= HourlyBucketMaxSpanHours;
         var chartGroups = useHourlyBuckets
             ? BuildHourlyChartPoints(rides, startUtc, endUtc)
             : BuildDailyChartPoints(rides);
-        var chartBucket = useHourlyBuckets ? "hour" : "day";
 
         return Ok(new DriverAnalyticsResponseDto
         {
-            Summary = new DriverAnalyticsSummaryDto
-            {
-                TotalProfit = decimal.Round(totalProfit, 2, MidpointRounding.AwayFromZero),
-                TotalRides = totalRides,
-                AverageRideRating = averageRideRating
-            },
+            Summary = BuildAnalyticsSummary(rides),
             ChartData = chartGroups,
-            ChartBucket = chartBucket,
+            ChartBucket = useHourlyBuckets ? "hour" : "day",
             RidesForMap = completedRides.Select(r => new RideMapSummaryDto
             {
                 RideId = r.Id,
@@ -120,31 +90,37 @@ public class AnalyticsController : ControllerBase
         if (ride is null)
             return NotFound(new { message = "Поїздку не знайдено." });
 
-        return Ok(new RideMapDto
-        {
-            Id = ride.Id,
-            FromAddress = ride.FromAddress,
-            ToAddress = ride.ToAddress,
-            FromLatitude = ride.FromLatitude,
-            FromLongitude = ride.FromLongitude,
-            ToLatitude = ride.ToLatitude,
-            ToLongitude = ride.ToLongitude,
-            DistanceKm = ride.DistanceKm,
-            RoutePoints = ride.RoutePoints
-                .OrderBy(p => p.RecordedAt)
-                .Select(p => new RoutePointDto
-                {
-                    Latitude = p.Latitude,
-                    Longitude = p.Longitude,
-                    RecordedAt = p.RecordedAt
-                })
-                .ToList()
-        });
+        return Ok(MapToRideMapDto(ride));
     }
 
-    private static List<DriverAnalyticsChartPointDto> BuildDailyChartPoints(List<RideForAnalytics> rides)
-    {
-        return rides
+    private async Task<List<CompletedRideRow>> QueryCompletedRidesForDriverAsync(
+        int driverId,
+        DateTime startUtc,
+        DateTime endUtc) =>
+        await _context.Rides
+            .AsNoTracking()
+            .Where(r =>
+                r.DriverId == driverId
+                && r.Status == RideStatus.Completed
+                && r.EndTime.HasValue
+                && r.EndTime >= startUtc
+                && r.EndTime <= endUtc)
+            .OrderByDescending(r => r.EndTime)
+            .Select(r => new CompletedRideRow
+            {
+                Id = r.Id,
+                FromAddress = r.FromAddress,
+                ToAddress = r.ToAddress,
+                EndTime = r.EndTime!.Value,
+                StartTime = r.StartTime,
+                DriverProfit = r.DriverProfit,
+                Rating = r.Rating,
+                DistanceKm = r.DistanceKm
+            })
+            .ToListAsync();
+
+    private static List<DriverAnalyticsChartPointDto> BuildDailyChartPoints(List<RideForAnalytics> rides) =>
+        rides
             .GroupBy(r => DateOnly.FromDateTime(r.EndTime))
             .OrderBy(g => g.Key)
             .Select(g => new DriverAnalyticsChartPointDto
@@ -152,14 +128,10 @@ public class AnalyticsController : ControllerBase
                 Label = g.Key.ToString("dd.MM", CultureInfo.InvariantCulture),
                 Profit = g.Sum(x => x.DriverProfit ?? 0m),
                 RidesCount = g.Count(),
-                TransitSecondsTotal = g.Sum(x =>
-                    x.StartTime.HasValue
-                        ? (x.EndTime - x.StartTime!.Value).TotalSeconds
-                        : 0d),
+                TransitSecondsTotal = g.Sum(GetTransitSeconds),
                 DistanceKmTotal = g.Sum(x => x.DistanceKm)
             })
             .ToList();
-    }
 
     private static List<DriverAnalyticsChartPointDto> BuildHourlyChartPoints(
         List<RideForAnalytics> rides,
@@ -170,16 +142,11 @@ public class AnalyticsController : ControllerBase
             .GroupBy(r => TruncateToUtcHour(r.EndTime))
             .ToDictionary(
                 g => g.Key,
-                g => new
-                {
-                    Profit = g.Sum(x => x.DriverProfit ?? 0m),
-                    Count = g.Count(),
-                    Transit = g.Sum(x =>
-                        x.StartTime.HasValue
-                            ? (x.EndTime - x.StartTime!.Value).TotalSeconds
-                            : 0d),
-                    Dkm = g.Sum(x => x.DistanceKm)
-                });
+                g => new HourBucketAggregate(
+                    g.Sum(x => x.DriverProfit ?? 0m),
+                    g.Count(),
+                    g.Sum(GetTransitSeconds),
+                    g.Sum(x => x.DistanceKm)));
 
         var firstHour = TruncateToUtcHour(startUtc);
         var lastHour = TruncateToUtcHour(endUtc);
@@ -195,16 +162,45 @@ public class AnalyticsController : ControllerBase
                 BucketStartUtc = t,
                 Profit = agg?.Profit ?? 0m,
                 RidesCount = agg?.Count ?? 0,
-                TransitSecondsTotal = agg?.Transit ?? 0d,
-                DistanceKmTotal = agg?.Dkm ?? 0m
+                TransitSecondsTotal = agg?.TransitSeconds ?? 0d,
+                DistanceKmTotal = agg?.DistanceKm ?? 0m
             });
         }
 
         return result;
     }
 
+    private static double GetTransitSeconds(RideForAnalytics ride) =>
+        ride.StartTime.HasValue
+            ? (ride.EndTime - ride.StartTime!.Value).TotalSeconds
+            : 0d;
+
+    private static RideMapDto MapToRideMapDto(Ride ride) => new()
+    {
+        Id = ride.Id,
+        FromAddress = ride.FromAddress,
+        ToAddress = ride.ToAddress,
+        FromLatitude = ride.FromLatitude,
+        FromLongitude = ride.FromLongitude,
+        ToLatitude = ride.ToLatitude,
+        ToLongitude = ride.ToLongitude,
+        DistanceKm = ride.DistanceKm,
+        RoutePoints = ride.RoutePoints
+            .OrderBy(p => p.RecordedAt)
+            .Select(p => new RoutePointDto
+            {
+                Latitude = p.Latitude,
+                Longitude = p.Longitude,
+                RecordedAt = p.RecordedAt
+            })
+            .ToList()
+    };
+
     private static DateTime TruncateToUtcHour(DateTime utc) =>
-        new DateTime(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, DateTimeKind.Utc);
+        new(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, DateTimeKind.Utc);
+
+    private static DateTime ToUtc(DateTime dateTime) =>
+        dateTime.Kind == DateTimeKind.Utc ? dateTime : dateTime.ToUniversalTime();
 
     private static string FormatHourlyAxisLabel(DateTime hourUtc, bool sameUtcCalendarDay) =>
         sameUtcCalendarDay
@@ -217,7 +213,7 @@ public class AnalyticsController : ControllerBase
         if (!Enum.TryParse<UserRole>(roleClaim, out var role))
             return Unauthorized(new { message = "Невідома роль." });
 
-        if (role == UserRole.Manager || role == UserRole.SuperAdmin)
+        if (role is UserRole.Manager or UserRole.SuperAdmin)
             return null;
 
         if (role != UserRole.Driver)
@@ -240,6 +236,25 @@ public class AnalyticsController : ControllerBase
         return null;
     }
 
+    private static DriverAnalyticsSummaryDto BuildAnalyticsSummary(List<RideForAnalytics> rides)
+    {
+        var totalProfit = rides.Sum(r => r.DriverProfit ?? 0m);
+        var ratedRides = rides.Where(r => r.Rating.HasValue).ToList();
+        double? averageRideRating = ratedRides.Count == 0
+            ? null
+            : Math.Round(ratedRides.Average(r => (double)r.Rating!.Value), 2, MidpointRounding.AwayFromZero);
+
+        return new DriverAnalyticsSummaryDto
+        {
+            TotalProfit = RoundMoney(totalProfit),
+            TotalRides = rides.Count,
+            AverageRideRating = averageRideRating
+        };
+    }
+
+    private static decimal RoundMoney(decimal value) =>
+        decimal.Round(value, 2, MidpointRounding.AwayFromZero);
+
     private sealed class RideForAnalytics
     {
         public DateTime EndTime { get; set; }
@@ -248,4 +263,22 @@ public class AnalyticsController : ControllerBase
         public decimal? Rating { get; set; }
         public decimal DistanceKm { get; set; }
     }
+
+    private sealed class CompletedRideRow
+    {
+        public int Id { get; set; }
+        public string FromAddress { get; set; } = string.Empty;
+        public string ToAddress { get; set; } = string.Empty;
+        public DateTime EndTime { get; set; }
+        public DateTime? StartTime { get; set; }
+        public decimal? DriverProfit { get; set; }
+        public decimal? Rating { get; set; }
+        public decimal DistanceKm { get; set; }
+    }
+
+    private sealed record HourBucketAggregate(
+        decimal Profit,
+        int Count,
+        double TransitSeconds,
+        decimal DistanceKm);
 }

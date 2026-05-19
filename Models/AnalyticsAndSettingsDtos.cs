@@ -1,5 +1,11 @@
 namespace Backend.Models;
 
+public static class AnalyticsChartBuckets
+{
+    public const string Hour = "hour";
+    public const string Day = "day";
+}
+
 public class FinancialSettingsDto
 {
     public decimal BaseFare { get; set; }
@@ -40,7 +46,7 @@ public class DriverAnalyticsResponseDto
 {
     public DriverAnalyticsSummaryDto Summary { get; set; } = null!;
     public List<DriverAnalyticsChartPointDto> ChartData { get; set; } = [];
-    /// <summary>"hour" for short ranges (24h, вчора), "day" for longer periods.</summary>
-    public string ChartBucket { get; set; } = "day";
+    /// <summary><see cref="AnalyticsChartBuckets.Hour"/> for short ranges (24h, вчора), <see cref="AnalyticsChartBuckets.Day"/> for longer periods.</summary>
+    public string ChartBucket { get; set; } = AnalyticsChartBuckets.Day;
     public List<RideMapSummaryDto> RidesForMap { get; set; } = [];
 }

@@ -115,16 +115,14 @@ public class DriverRidesController : ControllerBase
         if (profile is null)
             return Forbid();
 
-        var ride = await _context.Rides.FirstOrDefaultAsync(r => r.Id == id && r.DriverId == profile.Id);
+        var ride = await GetRideForDriverAsync(id, profile.Id);
         if (ride is null)
             return NotFound(new { message = "Замовлення не знайдено." });
 
         if (ride.Status != RideStatus.Accepted)
             return BadRequest(new { message = "Скасувати можна лише прийняте замовлення до початку поїздки." });
 
-        var acceptedAt = ride.AcceptedAt ?? ride.CreatedAt;
-        var cancelDeadline = acceptedAt.AddMinutes(CancelWindowMinutes);
-        if (DateTime.UtcNow > cancelDeadline)
+        if (!IsWithinCancelWindow(ride))
             return BadRequest(new { message = "Час для скасування замовлення минув." });
 
         var settings = await _ridePricing.GetSettingsAsync();
@@ -152,7 +150,7 @@ public class DriverRidesController : ControllerBase
         if (profile.UserStatus == UserStatus.InRide)
             return BadRequest(new { message = "У вас уже є активна поїздка." });
 
-        var ride = await _context.Rides.FirstOrDefaultAsync(r => r.Id == id && r.DriverId == profile.Id);
+        var ride = await GetRideForDriverAsync(id, profile.Id);
         if (ride is null)
             return NotFound(new { message = "Поїздку не знайдено." });
 
@@ -178,7 +176,7 @@ public class DriverRidesController : ControllerBase
         if (profile is null)
             return Forbid();
 
-        var ride = await _context.Rides.FirstOrDefaultAsync(r => r.Id == id && r.DriverId == profile.Id);
+        var ride = await GetRideForDriverAsync(id, profile.Id);
         if (ride is null)
             return NotFound(new { message = "Поїздку не знайдено." });
 
@@ -209,7 +207,7 @@ public class DriverRidesController : ControllerBase
         if (profile is null)
             return Forbid();
 
-        var ride = await _context.Rides.FirstOrDefaultAsync(r => r.Id == id && r.DriverId == profile.Id);
+        var ride = await GetRideForDriverAsync(id, profile.Id);
         if (ride is null)
             return NotFound(new { message = "Поїздку не знайдено." });
 
@@ -222,7 +220,7 @@ public class DriverRidesController : ControllerBase
         var now = DateTime.UtcNow;
         foreach (var point in request.Points)
         {
-            if (point.Latitude is < -90 or > 90 || point.Longitude is < -180 or > 180)
+            if (!HasValidCoordinates(point.Latitude, point.Longitude))
                 continue;
 
             _context.RideRoutePoints.Add(new RideRoutePoint
@@ -243,6 +241,19 @@ public class DriverRidesController : ControllerBase
             r.DriverId == driverProfileId
             && (r.Status == RideStatus.Accepted || r.Status == RideStatus.InRide));
 
+    private Task<Ride?> GetRideForDriverAsync(int rideId, int driverProfileId) =>
+        _context.Rides.FirstOrDefaultAsync(r => r.Id == rideId && r.DriverId == driverProfileId);
+
+    private static bool IsWithinCancelWindow(Ride ride)
+    {
+        var acceptedAt = ride.AcceptedAt ?? ride.CreatedAt;
+        var cancelDeadline = acceptedAt.AddMinutes(CancelWindowMinutes);
+        return DateTime.UtcNow <= cancelDeadline;
+    }
+
+    private static bool HasValidCoordinates(decimal latitude, decimal longitude) =>
+        latitude is >= -90 and <= 90 && longitude is >= -180 and <= 180;
+
     private static DriverPendingRideDto MapPending(Ride ride, SystemSettings settings) =>
         new()
         {
@@ -255,19 +266,15 @@ public class DriverRidesController : ControllerBase
 
     private static decimal? EstimateDriverProfit(decimal distanceKm, SystemSettings settings)
     {
-        var price = decimal.Round(settings.BaseFare + distanceKm * settings.CostPerKm, 2, MidpointRounding.AwayFromZero);
-        var percentFee = decimal.Round(price * settings.PlatformFeePercentage, 2, MidpointRounding.AwayFromZero);
-        return decimal.Round(price - settings.PlatformFixedFee - percentFee, 2, MidpointRounding.AwayFromZero);
+        var price = RoundMoney(settings.BaseFare + distanceKm * settings.CostPerKm);
+        var percentFee = RoundMoney(price * settings.PlatformFeePercentage);
+        return RoundMoney(price - settings.PlatformFixedFee - percentFee);
     }
 
     private static DriverActiveRideDto MapActive(Ride ride, SystemSettings settings)
     {
-        var profit = ride.DriverProfit ?? EstimateDriverProfit(ride.DistanceKm, settings);
-        var acceptedAt = ride.AcceptedAt ?? (ride.Status == RideStatus.Accepted ? ride.CreatedAt : (DateTime?)null);
-        var cancelDeadlineUtc = acceptedAt?.AddMinutes(CancelWindowMinutes);
-        var cancelSecondsRemaining = cancelDeadlineUtc is null
-            ? 0
-            : Math.Max(0, (int)Math.Floor((cancelDeadlineUtc.Value - DateTime.UtcNow).TotalSeconds));
+        var driverProfit = ride.DriverProfit ?? EstimateDriverProfit(ride.DistanceKm, settings);
+        var (acceptedAt, cancelSecondsRemaining, canCancel) = GetCancelWindowInfo(ride);
 
         return new DriverActiveRideDto
         {
@@ -276,70 +283,50 @@ public class DriverRidesController : ControllerBase
             FromAddress = ride.FromAddress,
             ToAddress = ride.ToAddress,
             DistanceKm = ride.DistanceKm,
-            DriverProfit = profit,
+            DriverProfit = driverProfit,
             StartTime = ride.StartTime,
             AcceptedAt = acceptedAt,
             CancelSecondsRemaining = ride.Status == RideStatus.Accepted ? cancelSecondsRemaining : 0,
-            CanCancel = ride.Status == RideStatus.Accepted && cancelSecondsRemaining > 0
+            CanCancel = ride.Status == RideStatus.Accepted && canCancel
         };
     }
 
+    private static (DateTime? acceptedAt, int cancelSecondsRemaining, bool canCancel) GetCancelWindowInfo(Ride ride)
+    {
+        var acceptedAt = ride.AcceptedAt ?? (ride.Status == RideStatus.Accepted ? ride.CreatedAt : null);
+        if (acceptedAt is null)
+            return (null, 0, false);
+
+        var cancelDeadlineUtc = acceptedAt.Value.AddMinutes(CancelWindowMinutes);
+        var cancelSecondsRemaining = Math.Max(0, (int)Math.Floor((cancelDeadlineUtc - DateTime.UtcNow).TotalSeconds));
+        return (acceptedAt, cancelSecondsRemaining, cancelSecondsRemaining > 0);
+    }
+
+    private static decimal RoundMoney(decimal value) =>
+        decimal.Round(value, 2, MidpointRounding.AwayFromZero);
+
     private async Task<UserProfile?> GetCurrentDriverProfileAsync()
     {
-        var userId = GetCurrentUserId();
-        if (userId is null) return null;
+        var whitelistId = GetCurrentWhitelistId();
+        if (whitelistId is null)
+            return null;
 
-        var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == userId.Value);
+        var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == whitelistId.Value);
         if (profile is null || profile.Role != UserRole.Driver)
             return null;
 
         return profile;
     }
 
-    private int? GetCurrentUserId()
+    private int? GetCurrentWhitelistId()
     {
-        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        return int.TryParse(idClaim, out var id) ? id : null;
+        var nameIdentifier = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return int.TryParse(nameIdentifier, out var whitelistId) ? whitelistId : null;
     }
 
     private Task BroadcastPresenceChanged(int userId, UserStatus status)
         => _presenceHub.Clients.All.SendAsync("PresenceChanged", new { userId, status = status.ToString() });
 
-    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
-        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
-}
-
-public class DriverPendingRideDto
-{
-    public int Id { get; set; }
-    public string FromAddress { get; set; } = string.Empty;
-    public string ToAddress { get; set; } = string.Empty;
-    public decimal DistanceKm { get; set; }
-    public decimal? DriverProfit { get; set; }
-}
-
-public class DriverActiveRideDto
-{
-    public int Id { get; set; }
-    public RideStatus Status { get; set; }
-    public string FromAddress { get; set; } = string.Empty;
-    public string ToAddress { get; set; } = string.Empty;
-    public decimal DistanceKm { get; set; }
-    public decimal? DriverProfit { get; set; }
-    public DateTime? StartTime { get; set; }
-    public DateTime? AcceptedAt { get; set; }
-    public int CancelSecondsRemaining { get; set; }
-    public bool CanCancel { get; set; }
-}
-
-public class AppendRoutePointsRequest
-{
-    public List<RoutePointInputDto> Points { get; set; } = [];
-}
-
-public class RoutePointInputDto
-{
-    public decimal Latitude { get; set; }
-    public decimal Longitude { get; set; }
-    public DateTime? RecordedAt { get; set; }
+    private Task BroadcastDashboardDataChanged(string entity, string action, int whitelistUserId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId = whitelistUserId });
 }

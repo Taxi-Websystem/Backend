@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json.Serialization;
+
 using Backend.Data;
 using Backend.Hubs;
 using Backend.Services;
+
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;

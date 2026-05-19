@@ -68,3 +68,38 @@ public class RideMapSummaryDto
     /// <summary>UTC; клієнт форматує в локальному часовому поясі.</summary>
     public DateTime EndTime { get; set; }
 }
+
+public class DriverPendingRideDto
+{
+    public int Id { get; set; }
+    public string FromAddress { get; set; } = string.Empty;
+    public string ToAddress { get; set; } = string.Empty;
+    public decimal DistanceKm { get; set; }
+    public decimal? DriverProfit { get; set; }
+}
+
+public class DriverActiveRideDto
+{
+    public int Id { get; set; }
+    public RideStatus Status { get; set; }
+    public string FromAddress { get; set; } = string.Empty;
+    public string ToAddress { get; set; } = string.Empty;
+    public decimal DistanceKm { get; set; }
+    public decimal? DriverProfit { get; set; }
+    public DateTime? StartTime { get; set; }
+    public DateTime? AcceptedAt { get; set; }
+    public int CancelSecondsRemaining { get; set; }
+    public bool CanCancel { get; set; }
+}
+
+public class AppendRoutePointsRequest
+{
+    public List<RoutePointInputDto> Points { get; set; } = [];
+}
+
+public class RoutePointInputDto
+{
+    public decimal Latitude { get; set; }
+    public decimal Longitude { get; set; }
+    public DateTime? RecordedAt { get; set; }
+}

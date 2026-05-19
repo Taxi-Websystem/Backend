@@ -1,3 +1,5 @@
+using System.Security.Claims;
+
 using Backend.Data;
 using Backend.Hubs;
 using Backend.Models;
@@ -7,7 +9,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
 
 namespace Backend.Controllers;
 
@@ -35,15 +36,16 @@ public class UserWhitelistController : ControllerBase
     public async Task<ActionResult<UserWhitelist>> GetById(int id)
     {
         var entry = await _context.UserWhitelists.FindAsync(id);
-        if (entry is null) return NotFound();
+        if (entry is null)
+            return NotFound();
+
         return entry;
     }
 
     [HttpPost]
     public async Task<ActionResult<UserWhitelist>> Create(UserWhitelist entry)
     {
-        var currentRole = GetCurrentRole();
-        if (!CanManageWhitelistRole(currentRole, entry.Role))
+        if (!CanManageWhitelistRole(GetActorRole(), entry.Role))
             return Forbid();
 
         var phone = PhoneNumberValidation.Normalize(entry.PhoneNumber);
@@ -64,80 +66,25 @@ public class UserWhitelistController : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(int id, UserWhitelist entry)
     {
-        if (id != entry.Id) return BadRequest();
+        if (id != entry.Id)
+            return BadRequest();
 
         var existing = await _context.UserWhitelists.FirstOrDefaultAsync(w => w.Id == id);
-        if (existing is null) return NotFound();
+        if (existing is null)
+            return NotFound();
 
         var currentUserId = GetCurrentUserId();
-        var currentRole = GetCurrentRole();
-
+        var actorRole = GetActorRole();
         var isSelf = currentUserId.HasValue && currentUserId.Value == id;
 
-        if (isSelf)
-        {
-            if (currentRole != UserRole.SuperAdmin || existing.Role != UserRole.SuperAdmin)
-                return Forbid();
-            if (entry.Role != UserRole.SuperAdmin)
-                return BadRequest(new { message = "Змінити власну роль можна лише через налаштування передачі прав SuperAdmin." });
-
-            var phone = PhoneNumberValidation.Normalize(entry.PhoneNumber);
-            if (phone is null)
-                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
-
-            if (phone != existing.PhoneNumber
-                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, phone, existing.Id))
-            {
-                return BadRequest(new
-                {
-                    message = PhoneNumberValidation.DuplicateMessage,
-                    code = PhoneNumberValidation.PhoneTakenCode
-                });
-            }
-
-            existing.PhoneNumber = phone;
-            existing.IsActive = entry.IsActive;
-        }
-        else
-        {
-            if (existing.Role == UserRole.SuperAdmin && entry.Role != UserRole.SuperAdmin)
-                return Forbid();
-
-            if (existing.Role == UserRole.Manager && entry.Role == UserRole.Driver && currentRole != UserRole.SuperAdmin)
-                return Forbid();
-
-            if (!CanManageWhitelistRole(currentRole, entry.Role))
-                return Forbid();
-
-            var phone = PhoneNumberValidation.Normalize(entry.PhoneNumber);
-            if (phone is null)
-                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
-
-            if (phone != existing.PhoneNumber
-                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, phone, existing.Id))
-            {
-                return BadRequest(new
-                {
-                    message = PhoneNumberValidation.DuplicateMessage,
-                    code = PhoneNumberValidation.PhoneTakenCode
-                });
-            }
-
-            existing.PhoneNumber = phone;
-            existing.Role = entry.Role;
-            existing.IsActive = entry.IsActive;
-        }
+        var updateError = isSelf
+            ? await TryApplySelfSuperAdminUpdateAsync(existing, entry, actorRole)
+            : await TryApplyOtherWhitelistUpdateAsync(existing, entry, actorRole);
+        if (updateError is not null)
+            return updateError;
 
         existing.CreatedAt = DateTime.SpecifyKind(existing.CreatedAt, DateTimeKind.Utc);
-
-        var linkedProfile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == id);
-        if (linkedProfile is not null)
-        {
-            linkedProfile.Role = entry.Role;
-            linkedProfile.PhoneNumber = existing.PhoneNumber;
-            if (entry.Role == UserRole.Driver)
-                linkedProfile.UserStatus = UserStatus.Offline;
-        }
+        await SyncLinkedProfileAsync(id, entry.Role, existing.PhoneNumber);
 
         try
         {
@@ -157,19 +104,19 @@ public class UserWhitelistController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(int id)
     {
-        var currentUserId = GetCurrentUserId();
-        if (currentUserId == id)
+        if (GetCurrentUserId() == id)
             return Forbid();
 
         var entry = await _context.UserWhitelists.FindAsync(id);
-        if (entry is null) return NotFound();
+        if (entry is null)
+            return NotFound();
 
-        var currentRole = GetCurrentRole();
+        var actorRole = GetActorRole();
 
         if (entry.Role == UserRole.SuperAdmin)
             return Forbid();
 
-        if (currentRole == UserRole.Manager && entry.Role != UserRole.Driver)
+        if (actorRole == UserRole.Manager && entry.Role != UserRole.Driver)
             return Forbid();
 
         var linkedProfile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == id);
@@ -182,25 +129,81 @@ public class UserWhitelistController : ControllerBase
         return NoContent();
     }
 
+    private async Task<IActionResult?> TryApplySelfSuperAdminUpdateAsync(
+        UserWhitelist existing,
+        UserWhitelist entry,
+        UserRole actorRole)
+    {
+        if (actorRole != UserRole.SuperAdmin || existing.Role != UserRole.SuperAdmin)
+            return Forbid();
+
+        if (entry.Role != UserRole.SuperAdmin)
+            return BadRequest(new { message = "Змінити власну роль можна лише через налаштування передачі прав SuperAdmin." });
+
+        return await ApplyPhoneAndActiveStateAsync(existing, entry);
+    }
+
+    private async Task<IActionResult?> TryApplyOtherWhitelistUpdateAsync(
+        UserWhitelist existing,
+        UserWhitelist entry,
+        UserRole actorRole)
+    {
+        if (existing.Role == UserRole.SuperAdmin && entry.Role != UserRole.SuperAdmin)
+            return Forbid();
+
+        if (IsManagerDowngradeForbidden(existing.Role, entry.Role, actorRole))
+            return Forbid();
+
+        if (!CanManageWhitelistRole(actorRole, entry.Role))
+            return Forbid();
+
+        var phoneError = await ApplyPhoneAndActiveStateAsync(existing, entry);
+        if (phoneError is not null)
+            return phoneError;
+
+        existing.Role = entry.Role;
+        return null;
+    }
+
+    private async Task<IActionResult?> ApplyPhoneAndActiveStateAsync(UserWhitelist existing, UserWhitelist entry)
+    {
+        var (normalizedPhone, phoneError) = await ValidatePhoneForUpdateAsync(
+            entry.PhoneNumber,
+            existing.PhoneNumber,
+            existing.Id);
+        if (phoneError is not null)
+            return phoneError;
+
+        existing.PhoneNumber = normalizedPhone!;
+        existing.IsActive = entry.IsActive;
+        return null;
+    }
+
+    private async Task SyncLinkedProfileAsync(int whitelistUserId, UserRole role, string phoneNumber)
+    {
+        var linkedProfile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == whitelistUserId);
+        if (linkedProfile is null)
+            return;
+
+        linkedProfile.Role = role;
+        linkedProfile.PhoneNumber = phoneNumber;
+        if (role == UserRole.Driver)
+            linkedProfile.UserStatus = UserStatus.Offline;
+    }
+
     private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
         => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
-    private UserRole GetCurrentRole()
+    private UserRole GetActorRole()
     {
         var role = User.FindFirstValue(ClaimTypes.Role);
-        if (!Enum.TryParse<UserRole>(role, out var parsedRole))
-            return UserRole.Driver;
-
-        return parsedRole;
+        return Enum.TryParse<UserRole>(role, out var parsedRole) ? parsedRole : UserRole.Driver;
     }
 
     private int? GetCurrentUserId()
     {
         var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idClaim, out var parsedId))
-            return null;
-
-        return parsedId;
+        return int.TryParse(idClaim, out var parsedId) ? parsedId : null;
     }
 
     private static bool CanManageWhitelistRole(UserRole actorRole, UserRole targetRole)
@@ -214,5 +217,30 @@ public class UserWhitelistController : ControllerBase
             UserRole.Manager => targetRole == UserRole.Driver,
             _ => false
         };
+    }
+
+    private static bool IsManagerDowngradeForbidden(UserRole existingRole, UserRole nextRole, UserRole actorRole) =>
+        existingRole == UserRole.Manager && nextRole == UserRole.Driver && actorRole != UserRole.SuperAdmin;
+
+    private async Task<(string? normalizedPhone, IActionResult? errorResult)> ValidatePhoneForUpdateAsync(
+        string phoneNumber,
+        string currentPhoneNumber,
+        int existingEntryId)
+    {
+        var normalizedPhone = PhoneNumberValidation.Normalize(phoneNumber);
+        if (normalizedPhone is null)
+            return (null, BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage }));
+
+        if (normalizedPhone != currentPhoneNumber
+            && await PhoneNumberValidation.IsPhoneTakenAsync(_context, normalizedPhone, existingEntryId))
+        {
+            return (null, BadRequest(new
+            {
+                message = PhoneNumberValidation.DuplicateMessage,
+                code = PhoneNumberValidation.PhoneTakenCode
+            }));
+        }
+
+        return (normalizedPhone, null);
     }
 }

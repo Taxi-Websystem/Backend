@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
+
 using Backend.Data;
 using Backend.Hubs;
 using Backend.Models;
@@ -45,19 +46,19 @@ public class AuthController : ControllerBase
     [HttpPost("send-code")]
     public async Task<IActionResult> SendCode([FromBody] SendCodeRequest request)
     {
-        var entry = await _context.UserWhitelists
+        var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.PhoneNumber == request.PhoneNumber);
 
-        if (entry is null)
+        if (whitelistEntry is null)
             return Unauthorized(new { code = "NOT_FOUND", message = "Номер не зареєстрований у системі." });
 
-        if (!entry.IsActive)
+        if (!whitelistEntry.IsActive)
             return Unauthorized(new { code = "INACTIVE", message = "Обліковий запис деактивовано. Якщо ви вважаєте це помилкою, зверніться до підтримки." });
 
         var code = Random.Shared.Next(100000, 999999).ToString();
-        var cacheKey = $"otp:{request.PhoneNumber}";
+        var otpCacheKey = BuildOtpCacheKey(request.PhoneNumber);
 
-        _cache.Set(cacheKey, code, TimeSpan.FromMinutes(5));
+        _cache.Set(otpCacheKey, code, TimeSpan.FromMinutes(5));
 
         _logger.LogInformation("OTP for {Phone}: {Code}", request.PhoneNumber, code);
 
@@ -67,12 +68,12 @@ public class AuthController : ControllerBase
     [HttpPost("verify-code")]
     public async Task<IActionResult> VerifyCode([FromBody] VerifyCodeRequest request)
     {
-        var cacheKey = $"otp:{request.PhoneNumber}";
+        var otpCacheKey = BuildOtpCacheKey(request.PhoneNumber);
 
-        if (!_cache.TryGetValue(cacheKey, out string? cachedCode) || cachedCode != request.Code)
+        if (!_cache.TryGetValue(otpCacheKey, out string? cachedCode) || cachedCode != request.Code)
             return Unauthorized(new { message = "Невірний або прострочений код." });
 
-        _cache.Remove(cacheKey);
+        _cache.Remove(otpCacheKey);
 
         var whitelist = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.PhoneNumber == request.PhoneNumber && w.IsActive);
@@ -83,23 +84,7 @@ public class AuthController : ControllerBase
         var userProfile = await _context.UserProfiles
             .FirstOrDefaultAsync(p => p.UserId == whitelist.Id);
 
-        if (userProfile is null)
-        {
-            _context.UserProfiles.Add(new UserProfile
-            {
-                UserId = whitelist.Id,
-                PhoneNumber = whitelist.PhoneNumber,
-                Name = whitelist.PhoneNumber,
-                Role = whitelist.Role,
-                UserStatus = UserStatus.Offline
-            });
-        }
-        else
-        {
-            userProfile.PhoneNumber = whitelist.PhoneNumber;
-            userProfile.Role = whitelist.Role;
-            _context.UserProfiles.Update(userProfile);
-        }
+        UpsertUserProfile(userProfile, whitelist, whitelist.Role);
 
         await _context.SaveChangesAsync();
 
@@ -108,27 +93,9 @@ public class AuthController : ControllerBase
 
         var requiresRegistration = ProfileRequiresRegistration(profileRow);
 
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!));
-        var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-
-        var claims = new[]
-        {
-            new Claim(ClaimTypes.NameIdentifier, whitelist.Id.ToString()),
-            new Claim(ClaimTypes.MobilePhone, whitelist.PhoneNumber),
-            new Claim(ClaimTypes.Role, whitelist.Role.ToString())
-        };
-
-        var token = new JwtSecurityToken(
-            issuer: _configuration["Jwt:Issuer"],
-            audience: _configuration["Jwt:Audience"],
-            claims: claims,
-            expires: DateTime.UtcNow.AddDays(7),
-            signingCredentials: credentials
-        );
-
         return Ok(new
         {
-            token = new JwtSecurityTokenHandler().WriteToken(token),
+            token = GenerateJwtToken(whitelist.Id, whitelist.PhoneNumber, whitelist.Role),
             role = whitelist.Role.ToString(),
             requiresRegistration
         });
@@ -138,12 +105,7 @@ public class AuthController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult<LoginPublicStatsDto>> GetPublicStats()
     {
-        var kyivZone = GetKyivTimeZone();
-        var kyivNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, kyivZone);
-        var kyivStart = kyivNow.Date;
-        var kyivEnd = kyivStart.AddDays(1);
-        var todayStartUtc = TimeZoneInfo.ConvertTimeToUtc(kyivStart, kyivZone);
-        var tomorrowStartUtc = TimeZoneInfo.ConvertTimeToUtc(kyivEnd, kyivZone);
+        var (todayStartUtc, tomorrowStartUtc) = GetKyivTodayUtcBounds();
 
         var onlineDrivers = await (from profile in _context.UserProfiles
                                    join whitelist in _context.UserWhitelists on profile.UserId equals whitelist.Id
@@ -161,6 +123,19 @@ public class AuthController : ControllerBase
         return Ok(new LoginPublicStatsDto(onlineDrivers, todayTrips));
     }
 
+    private static string BuildOtpCacheKey(string phoneNumber) => $"otp:{phoneNumber}";
+
+    private static (DateTime todayStartUtc, DateTime tomorrowStartUtc) GetKyivTodayUtcBounds()
+    {
+        var kyivZone = GetKyivTimeZone();
+        var kyivNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, kyivZone);
+        var kyivDayStart = kyivNow.Date;
+        var kyivNextDayStart = kyivDayStart.AddDays(1);
+        return (
+            TimeZoneInfo.ConvertTimeToUtc(kyivDayStart, kyivZone),
+            TimeZoneInfo.ConvertTimeToUtc(kyivNextDayStart, kyivZone));
+    }
+
     private static TimeZoneInfo GetKyivTimeZone()
     {
         try
@@ -173,13 +148,24 @@ public class AuthController : ControllerBase
         }
     }
 
+    private bool TryGetWhitelistIdFromClaims(out int whitelistId)
+    {
+        var nameIdentifier = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return int.TryParse(nameIdentifier, out whitelistId);
+    }
+
+    private bool TryGetUserRoleFromClaims(out UserRole userRole)
+    {
+        var roleClaim = User.FindFirstValue(ClaimTypes.Role);
+        return Enum.TryParse(roleClaim, out userRole);
+    }
+
     /// <summary>Стан профілю для фронтенду (префіл форми завершення реєстрації).</summary>
     [HttpGet("me")]
     [Authorize]
     public async Task<ActionResult<AuthMeDto>> GetMe()
     {
-        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idClaim, out var whitelistId))
+        if (!TryGetWhitelistIdFromClaims(out var whitelistId))
             return Unauthorized(new { message = "Невалідний токен." });
 
         var whitelist = await _context.UserWhitelists.AsNoTracking()
@@ -207,12 +193,10 @@ public class AuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(new { message = "Ім'я обов'язкове." });
 
-        var idClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(idClaim, out var whitelistId))
+        if (!TryGetWhitelistIdFromClaims(out var whitelistId))
             return Unauthorized(new { message = "Невалідний токен." });
 
-        var roleClaim = User.FindFirstValue(ClaimTypes.Role);
-        if (!Enum.TryParse<UserRole>(roleClaim, out var userRole))
+        if (!TryGetUserRoleFromClaims(out var userRole))
             return Unauthorized(new { message = "Невалідна роль у токені." });
 
         var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == whitelistId);
@@ -223,29 +207,14 @@ public class AuthController : ControllerBase
 
         if (userRole == UserRole.Driver)
         {
-            if (string.IsNullOrWhiteSpace(request.CarBrand))
-                return BadRequest(new { message = "Марка авто обов'язкова для водія." });
-            if (!CarFieldValidation.IsValidCarBrandOrModel(request.CarBrand))
-                return BadRequest(new { message = "Марка авто: лише латинські літери, цифри, пробіл та дефіс." });
-            if (string.IsNullOrWhiteSpace(request.CarModel))
-                return BadRequest(new { message = "Модель авто обов'язкова для водія." });
-            if (!CarFieldValidation.IsValidCarBrandOrModel(request.CarModel))
-                return BadRequest(new { message = "Модель авто: лише латинські літери, цифри, пробіл та дефіс." });
-            if (string.IsNullOrWhiteSpace(request.CarColor))
-                return BadRequest(new { message = "Колір авто обов'язковий для водія." });
-            if (!CarFieldValidation.IsValidCarColorUa(request.CarColor))
-                return BadRequest(new { message = "Колір авто: лише українською (кирилиця) та дефіс." });
-            if (string.IsNullOrWhiteSpace(request.LicensePlate))
-                return BadRequest(new { message = "Номер авто обов'язковий для водія." });
+            var (normalizedLicensePlate, validationError) = ValidateAndNormalizeDriverRegistration(request);
+            if (validationError is not null)
+                return BadRequest(new { message = validationError });
 
-            var plate = NormalizeLicensePlate(request.LicensePlate);
-            if (plate is null || !LicensePlatePattern.IsMatch(plate))
-                return BadRequest(new { message = "Некоректний номер авто. Формат: 2 літери (латиниця або кирилиця), 4 цифри, 2 літери." });
-
-            profile.CarMake = request.CarBrand.Trim();
-            profile.CarModel = request.CarModel.Trim();
-            profile.CarColor = request.CarColor.Trim();
-            profile.LicensePlate = plate;
+            profile.CarMake = request.CarBrand!.Trim();
+            profile.CarModel = request.CarModel!.Trim();
+            profile.CarColor = request.CarColor!.Trim();
+            profile.LicensePlate = normalizedLicensePlate;
         }
 
         await _context.SaveChangesAsync();
@@ -265,7 +234,7 @@ public class AuthController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(raw))
             return null;
-        // Літери латиницею та кирилицею + цифри
+
         var s = new string(raw.Where(c => char.IsLetter(c) || char.IsDigit(c)).ToArray()).ToUpperInvariant();
         return s.Length == 8 ? s : null;
     }
@@ -274,8 +243,7 @@ public class AuthController : ControllerBase
     [Authorize(Policy = "SuperAdminOnly")]
     public async Task<IActionResult> TransferSuperAdmin([FromBody] TransferSuperAdminRequest request)
     {
-        var currentUserIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!int.TryParse(currentUserIdClaim, out var currentWhitelistId))
+        if (!TryGetWhitelistIdFromClaims(out var currentWhitelistId))
             return Unauthorized(new { message = "Невалідний токен користувача." });
 
         if (currentWhitelistId == request.TargetWhitelistId)
@@ -301,40 +269,10 @@ public class AuthController : ControllerBase
             .ToListAsync();
 
         var currentProfile = relatedProfiles.FirstOrDefault(p => p.UserId == currentWhitelist.Id);
-        if (currentProfile is null)
-        {
-            _context.UserProfiles.Add(new UserProfile
-            {
-                UserId = currentWhitelist.Id,
-                PhoneNumber = currentWhitelist.PhoneNumber,
-                Name = currentWhitelist.PhoneNumber,
-                Role = UserRole.Manager,
-                UserStatus = UserStatus.Offline
-            });
-        }
-        else
-        {
-            currentProfile.Role = UserRole.Manager;
-            currentProfile.PhoneNumber = currentWhitelist.PhoneNumber;
-        }
+        UpsertUserProfile(currentProfile, currentWhitelist, UserRole.Manager);
 
         var targetProfile = relatedProfiles.FirstOrDefault(p => p.UserId == targetWhitelist.Id);
-        if (targetProfile is null)
-        {
-            _context.UserProfiles.Add(new UserProfile
-            {
-                UserId = targetWhitelist.Id,
-                PhoneNumber = targetWhitelist.PhoneNumber,
-                Name = targetWhitelist.PhoneNumber,
-                Role = UserRole.SuperAdmin,
-                UserStatus = UserStatus.Offline
-            });
-        }
-        else
-        {
-            targetProfile.Role = UserRole.SuperAdmin;
-            targetProfile.PhoneNumber = targetWhitelist.PhoneNumber;
-        }
+        UpsertUserProfile(targetProfile, targetWhitelist, UserRole.SuperAdmin);
 
         await _context.SaveChangesAsync();
         await transaction.CommitAsync();
@@ -370,6 +308,56 @@ public class AuthController : ControllerBase
         );
 
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private void UpsertUserProfile(UserProfile? profile, UserWhitelist whitelist, UserRole role)
+    {
+        if (profile is null)
+        {
+            _context.UserProfiles.Add(new UserProfile
+            {
+                UserId = whitelist.Id,
+                PhoneNumber = whitelist.PhoneNumber,
+                Name = whitelist.PhoneNumber,
+                Role = role,
+                UserStatus = UserStatus.Offline
+            });
+            return;
+        }
+
+        profile.Role = role;
+        profile.PhoneNumber = whitelist.PhoneNumber;
+        _context.UserProfiles.Update(profile);
+    }
+
+    private static (string? normalizedLicensePlate, string? validationError) ValidateAndNormalizeDriverRegistration(
+        CompleteRegistrationRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.CarBrand))
+            return (null, "Марка авто обов'язкова для водія.");
+        if (!CarFieldValidation.IsValidCarBrandOrModel(request.CarBrand))
+            return (null, "Марка авто: лише латинські літери, цифри, пробіл та дефіс.");
+
+        if (string.IsNullOrWhiteSpace(request.CarModel))
+            return (null, "Модель авто обов'язкова для водія.");
+        if (!CarFieldValidation.IsValidCarBrandOrModel(request.CarModel))
+            return (null, "Модель авто: лише латинські літери, цифри, пробіл та дефіс.");
+
+        if (string.IsNullOrWhiteSpace(request.CarColor))
+            return (null, "Колір авто обов'язковий для водія.");
+        if (!CarFieldValidation.IsValidCarColorUa(request.CarColor))
+            return (null, "Колір авто: лише українською (кирилиця) та дефіс.");
+
+        if (string.IsNullOrWhiteSpace(request.LicensePlate))
+            return (null, "Номер авто обов'язковий для водія.");
+
+        var normalizedLicensePlate = NormalizeLicensePlate(request.LicensePlate);
+        if (normalizedLicensePlate is null || !LicensePlatePattern.IsMatch(normalizedLicensePlate))
+        {
+            return (null, "Некоректний номер авто. Формат: 2 літери (латиниця або кирилиця), 4 цифри, 2 літери.");
+        }
+
+        return (normalizedLicensePlate, null);
     }
 
     /// <summary>

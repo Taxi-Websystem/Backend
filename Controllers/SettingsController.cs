@@ -11,6 +11,9 @@ namespace Backend.Controllers;
 [Route("api/settings")]
 public class SettingsController : ControllerBase
 {
+    private const int SystemSettingsId = 1;
+    private const string SettingsNotFoundMessage = "Системні тарифи не знайдено.";
+
     private readonly ApplicationDbContext _context;
 
     public SettingsController(ApplicationDbContext context)
@@ -22,9 +25,9 @@ public class SettingsController : ControllerBase
     [Authorize(Policy = "ManagerOrSuperAdmin")]
     public async Task<ActionResult<FinancialSettingsDto>> Get()
     {
-        var row = await _context.SystemSettings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == 1);
+        var row = await FindSystemSettingsAsync(asNoTracking: true);
         if (row is null)
-            return NotFound(new { message = "Системні тарифи не знайдено." });
+            return NotFound(new { message = SettingsNotFoundMessage });
 
         return Ok(MapToDto(row));
     }
@@ -37,12 +40,11 @@ public class SettingsController : ControllerBase
         if (validationError is not null)
             return BadRequest(new { message = validationError });
 
-        var row = await _context.SystemSettings.FirstOrDefaultAsync(s => s.Id == 1);
+        var row = await FindSystemSettingsAsync(asNoTracking: false);
         if (row is null)
-            return NotFound(new { message = "Системні тарифи не знайдено." });
+            return NotFound(new { message = SettingsNotFoundMessage });
 
         SystemSettingsValidation.ApplyRoundedValues(row, dto);
-
         await _context.SaveChangesAsync();
         return NoContent();
     }
@@ -54,4 +56,13 @@ public class SettingsController : ControllerBase
         PlatformFixedFee = row.PlatformFixedFee,
         PlatformFeePercentage = row.PlatformFeePercentage
     };
+
+    private Task<SystemSettings?> FindSystemSettingsAsync(bool asNoTracking)
+    {
+        var query = asNoTracking
+            ? _context.SystemSettings.AsNoTracking()
+            : _context.SystemSettings.AsQueryable();
+
+        return query.FirstOrDefaultAsync(s => s.Id == SystemSettingsId);
+    }
 }

@@ -21,32 +21,40 @@ public class UserSettingsService : IUserSettingsService
 
     public async Task<UserSettings> GetOrCreateAsync(int userId, CancellationToken cancellationToken = default)
     {
-        var role = await _context.UserProfiles
-            .Where(p => p.UserId == userId)
-            .Select(p => p.Role)
+        var userRole = await _context.UserProfiles
+            .Where(profile => profile.UserId == userId)
+            .Select(profile => profile.Role)
             .FirstOrDefaultAsync(cancellationToken);
 
-        var existing = await _context.UserSettings
-            .FirstOrDefaultAsync(s => s.UserId == userId, cancellationToken);
-        if (existing is not null)
+        var userSettings = await _context.UserSettings
+            .FirstOrDefaultAsync(settings => settings.UserId == userId, cancellationToken);
+
+        if (userSettings is not null)
         {
-            if (role is UserRole.Manager or UserRole.SuperAdmin && !existing.IsAutoStatusEnabled)
-            {
-                // Для менеджерів і адмінів автостатус завжди увімкнений.
-                existing.IsAutoStatusEnabled = true;
-                await _context.SaveChangesAsync(cancellationToken);
-            }
-            return existing;
+            await EnsureAutoStatusForManagersAsync(userSettings, userRole, cancellationToken);
+            return userSettings;
         }
 
-        var created = new UserSettings
+        var createdSettings = new UserSettings
         {
             UserId = userId,
             IsAutoStatusEnabled = true
         };
 
-        _context.UserSettings.Add(created);
+        _context.UserSettings.Add(createdSettings);
         await _context.SaveChangesAsync(cancellationToken);
-        return created;
+        return createdSettings;
+    }
+
+    private async Task EnsureAutoStatusForManagersAsync(
+        UserSettings userSettings,
+        UserRole userRole,
+        CancellationToken cancellationToken)
+    {
+        if (userRole is not (UserRole.Manager or UserRole.SuperAdmin) || userSettings.IsAutoStatusEnabled)
+            return;
+
+        userSettings.IsAutoStatusEnabled = true;
+        await _context.SaveChangesAsync(cancellationToken);
     }
 }

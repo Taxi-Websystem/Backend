@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Claims;
 using Backend.Data;
+using Backend.Models;
 using Backend.Models.Enums;
 using Backend.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -13,8 +14,9 @@ namespace Backend.Hubs;
 public class PresenceHub : Hub
 {
     private static readonly ConcurrentDictionary<int, int> _activeConnections = new();
-    public static bool HasActiveConnections(int userId)
-        => _activeConnections.TryGetValue(userId, out var count) && count > 0;
+
+    public static bool HasActiveConnections(int userId) =>
+        _activeConnections.TryGetValue(userId, out var connectionCount) && connectionCount > 0;
 
     private readonly ApplicationDbContext _context;
     private readonly IUserSettingsService _userSettingsService;
@@ -30,20 +32,8 @@ public class PresenceHub : Hub
         var userId = GetUserId();
         if (userId is not null)
         {
-            _activeConnections.AddOrUpdate(userId.Value, 1, static (_, count) => count + 1);
-
-            var settings = await _userSettingsService.GetOrCreateAsync(userId.Value);
-            if (settings.IsAutoStatusEnabled)
-            {
-                var profile = await _context.UserProfiles
-                    .FirstOrDefaultAsync(p => p.UserId == userId.Value);
-                if (profile is not null && profile.UserStatus == UserStatus.Offline)
-                {
-                    profile.UserStatus = UserStatus.Online;
-                    await _context.SaveChangesAsync();
-                    await BroadcastStatusChanged(userId.Value, UserStatus.Online);
-                }
-            }
+            RegisterConnection(userId.Value);
+            await TryPromoteToOnlineAsync(userId.Value);
         }
 
         await base.OnConnectedAsync();
@@ -54,42 +44,67 @@ public class PresenceHub : Hub
         var userId = GetUserId();
         if (userId is not null)
         {
-            var count = _activeConnections.AddOrUpdate(userId.Value, 0, static (_, current) => Math.Max(0, current - 1));
-            if (count <= 0)
+            var remainingConnections = UnregisterConnection(userId.Value);
+            if (remainingConnections == 0)
             {
-                _activeConnections.TryRemove(userId.Value, out _);
-            }
-
-            if (count == 0)
-            {
-                var profile = await _context.UserProfiles
-                    .FirstOrDefaultAsync(p => p.UserId == userId.Value);
-
-                if (profile is not null && profile.UserStatus != UserStatus.InRide)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(5));
-
-                    if (!_activeConnections.TryGetValue(userId.Value, out var activeAfterDelay) || activeAfterDelay <= 0)
-                    {
-                        var settings = await _userSettingsService.GetOrCreateAsync(userId.Value);
-                        if (settings.IsAutoStatusEnabled)
-                        {
-                            profile = await _context.UserProfiles
-                                .FirstOrDefaultAsync(p => p.UserId == userId.Value);
-
-                            if (profile is not null && profile.UserStatus != UserStatus.InRide)
-                            {
-                                profile.UserStatus = UserStatus.Offline;
-                                await _context.SaveChangesAsync();
-                                await BroadcastStatusChanged(userId.Value, UserStatus.Offline);
-                            }
-                        }
-                    }
-                }
+                await TryPromoteToOfflineAsync(userId.Value);
             }
         }
 
         await base.OnDisconnectedAsync(exception);
+    }
+
+    private static void RegisterConnection(int userId) =>
+        _activeConnections.AddOrUpdate(userId, 1, static (_, count) => count + 1);
+
+    private static int UnregisterConnection(int userId)
+    {
+        var remainingConnections = _activeConnections.AddOrUpdate(userId, 0, static (_, current) => Math.Max(0, current - 1));
+        if (remainingConnections <= 0)
+        {
+            _activeConnections.TryRemove(userId, out _);
+        }
+
+        return remainingConnections;
+    }
+
+    private async Task TryPromoteToOnlineAsync(int userId)
+    {
+        var userSettings = await _userSettingsService.GetOrCreateAsync(userId);
+        if (!userSettings.IsAutoStatusEnabled)
+            return;
+
+        var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == userId);
+        if (profile is null || profile.UserStatus != UserStatus.Offline)
+            return;
+
+        profile.UserStatus = UserStatus.Online;
+        await _context.SaveChangesAsync();
+        await BroadcastStatusChanged(userId, UserStatus.Online);
+    }
+
+    private async Task TryPromoteToOfflineAsync(int userId)
+    {
+        var profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == userId);
+        if (profile is null || profile.UserStatus == UserStatus.InRide)
+            return;
+
+        await Task.Delay(TimeSpan.FromSeconds(5));
+
+        if (HasActiveConnections(userId))
+            return;
+
+        var userSettings = await _userSettingsService.GetOrCreateAsync(userId);
+        if (!userSettings.IsAutoStatusEnabled)
+            return;
+
+        profile = await _context.UserProfiles.FirstOrDefaultAsync(p => p.UserId == userId);
+        if (profile is null || profile.UserStatus == UserStatus.InRide)
+            return;
+
+        profile.UserStatus = UserStatus.Offline;
+        await _context.SaveChangesAsync();
+        await BroadcastStatusChanged(userId, UserStatus.Offline);
     }
 
     private int? GetUserId()
@@ -98,8 +113,8 @@ public class PresenceHub : Hub
         return int.TryParse(idClaim, out var userId) ? userId : null;
     }
 
-    private Task BroadcastStatusChanged(int userId, UserStatus status)
-        => Task.WhenAll(
+    private Task BroadcastStatusChanged(int userId, UserStatus status) =>
+        Task.WhenAll(
             Clients.All.SendAsync("PresenceChanged", new { userId, status = status.ToString() }),
             Clients.All.SendAsync("DashboardDataChanged", new { entity = "presence", action = "status", userId }));
 }

@@ -16,18 +16,20 @@ public class RidePricingService : IRidePricingService
 
     public async Task<SystemSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
     {
-        var row = await _context.SystemSettings.AsNoTracking().FirstOrDefaultAsync(s => s.Id == 1, cancellationToken);
-        if (row is null)
+        var systemSettings = await _context.SystemSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Id == 1, cancellationToken);
+
+        if (systemSettings is null)
             throw new InvalidOperationException("SystemSettings row Id=1 is missing.");
 
-        return row;
+        return systemSettings;
     }
 
     public void ApplyFinancials(Ride ride, SystemSettings settings, decimal distanceKm, RideStatus status)
     {
-        ride.DistanceKm = decimal.Round(distanceKm, 2, MidpointRounding.AwayFromZero);
-        ride.Price = decimal.Round(settings.BaseFare + ride.DistanceKm * settings.CostPerKm, 2,
-            MidpointRounding.AwayFromZero);
+        ride.DistanceKm = RoundMoney(distanceKm);
+        ride.Price = RoundMoney(settings.BaseFare + ride.DistanceKm * settings.CostPerKm);
 
         if (status == RideStatus.Canceled)
         {
@@ -35,8 +37,10 @@ public class RidePricingService : IRidePricingService
             return;
         }
 
-        var percentFee = decimal.Round(ride.Price * settings.PlatformFeePercentage, 2, MidpointRounding.AwayFromZero);
-        ride.DriverProfit = decimal.Round(ride.Price - settings.PlatformFixedFee - percentFee, 2,
-            MidpointRounding.AwayFromZero);
+        var percentFee = RoundMoney(ride.Price * settings.PlatformFeePercentage);
+        ride.DriverProfit = RoundMoney(ride.Price - settings.PlatformFixedFee - percentFee);
     }
+
+    private static decimal RoundMoney(decimal value) =>
+        decimal.Round(value, 2, MidpointRounding.AwayFromZero);
 }

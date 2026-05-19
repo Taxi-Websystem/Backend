@@ -1,3 +1,5 @@
+using System.Security.Claims;
+
 using Backend.Data;
 using Backend.Hubs;
 using Backend.Models;
@@ -8,7 +10,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
 
 namespace Backend.Controllers;
 
@@ -48,7 +49,6 @@ public class ManagersController : ControllerBase
             var settings = await _userSettingsService.GetOrCreateAsync(row.profile.UserId);
             if (!settings.IsAutoStatusEnabled)
             {
-                // Для Manager/SuperAdmin автостатус завжди активний.
                 settings.IsAutoStatusEnabled = true;
                 hasChanges = true;
             }
@@ -95,7 +95,8 @@ public class ManagersController : ControllerBase
     [Authorize(Policy = "SuperAdminOnly")]
     public async Task<ActionResult<UserProfile>> Create(CreateManagerRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Name))
+        var normalizedName = NormalizeRequiredName(request.Name);
+        if (normalizedName is null)
             return BadRequest(new { message = "Ім'я обов'язкове." });
 
         var phone = PhoneNumberValidation.Normalize(request.PhoneNumber);
@@ -143,7 +144,7 @@ public class ManagersController : ControllerBase
         {
             UserId = whitelistEntry.Id,
             PhoneNumber = whitelistEntry.PhoneNumber,
-            Name = request.Name.Trim(),
+            Name = normalizedName,
             Role = UserRole.Manager
         };
 
@@ -158,7 +159,7 @@ public class ManagersController : ControllerBase
     public async Task<ActionResult<UserProfile>> GetById(int id)
     {
         var manager = await _context.UserProfiles.FindAsync(id);
-        if (manager is null || (manager.Role != UserRole.Manager && manager.Role != UserRole.SuperAdmin))
+        if (manager is null || !IsManagerOrSuperAdmin(manager.Role))
             return NotFound();
 
         if (!await IsActiveWhitelistEntry(manager.UserId))
@@ -170,11 +171,12 @@ public class ManagersController : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(int id, UpdateManagerRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Name))
+        var normalizedName = NormalizeRequiredName(request.Name);
+        if (normalizedName is null)
             return BadRequest(new { message = "Ім'я обов'язкове." });
 
         var existing = await _context.UserProfiles.FindAsync(id);
-        if (existing is null || (existing.Role != UserRole.Manager && existing.Role != UserRole.SuperAdmin))
+        if (existing is null || !IsManagerOrSuperAdmin(existing.Role))
             return NotFound();
 
         var currentUserId = GetCurrentUserId();
@@ -193,11 +195,11 @@ public class ManagersController : ControllerBase
         var actorRole = User.FindFirstValue(ClaimTypes.Role);
         var isSuperAdminActor = string.Equals(actorRole, UserRole.SuperAdmin.ToString(), StringComparison.Ordinal);
 
+        if (IsManagerEditingForbidden(isSuperAdminActor, isSelfEdit))
+            return Forbid();
+
         if (!isSuperAdminActor)
         {
-            if (!isSelfEdit)
-                return Forbid();
-
             if (request.Role.HasValue && request.Role.Value != existing.Role)
                 return Forbid();
 
@@ -207,41 +209,27 @@ public class ManagersController : ControllerBase
 
         if (request.Role.HasValue && request.Role.Value != existing.Role)
         {
-            if (isSelfEdit)
-                return BadRequest(new { message = "Не можна змінити власну роль цим запитом." });
+            var roleChangeValidationError = GetManagerRoleChangeValidationError(existing.Role, request.Role.Value, isSelfEdit);
+            if (roleChangeValidationError is not null)
+                return BadRequest(new { message = roleChangeValidationError });
 
-            if (request.Role.Value == UserRole.SuperAdmin)
-                return BadRequest(new { message = "Роль SuperAdmin призначається лише через передачу прав." });
-
-            if (existing.Role != UserRole.Manager || request.Role.Value != UserRole.Driver)
-                return BadRequest(new { message = "Дозволено лише зниження менеджера до водія." });
-
-            whitelistEntry.Role = UserRole.Driver;
-            existing.Role = UserRole.Driver;
-            existing.UserStatus = UserStatus.Offline;
+            ApplyManagerToDriverRoleChange(existing, whitelistEntry);
         }
 
-        existing.Name = request.Name.Trim();
+        existing.Name = normalizedName;
         _context.UserProfiles.Update(existing);
 
         if (isSuperAdminActor && !string.IsNullOrWhiteSpace(request.PhoneNumber))
         {
-            var normalizedPhone = PhoneNumberValidation.Normalize(request.PhoneNumber);
-            if (normalizedPhone is null)
-                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
+            var (normalizedPhone, phoneValidationError) = await ValidatePhoneForUpdateAsync(
+                request.PhoneNumber,
+                whitelistEntry.PhoneNumber,
+                whitelistEntry.Id);
+            if (phoneValidationError is not null)
+                return phoneValidationError;
 
-            if (normalizedPhone != whitelistEntry.PhoneNumber
-                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, normalizedPhone, whitelistEntry.Id))
-            {
-                return BadRequest(new
-                {
-                    message = PhoneNumberValidation.DuplicateMessage,
-                    code = PhoneNumberValidation.PhoneTakenCode
-                });
-            }
-
-            whitelistEntry.PhoneNumber = normalizedPhone;
-            existing.PhoneNumber = normalizedPhone;
+            whitelistEntry.PhoneNumber = normalizedPhone!;
+            existing.PhoneNumber = normalizedPhone!;
         }
 
         _context.UserWhitelists.Update(whitelistEntry);
@@ -295,6 +283,67 @@ public class ManagersController : ControllerBase
     private Task<bool> IsActiveWhitelistEntry(int userId)
     {
         return _context.UserWhitelists.AnyAsync(w => w.Id == userId && w.IsActive);
+    }
+
+    private static bool IsManagerOrSuperAdmin(UserRole role)
+    {
+        return role is UserRole.Manager or UserRole.SuperAdmin;
+    }
+
+    private static bool IsManagerEditingForbidden(bool isSuperAdminActor, bool isSelfEdit)
+    {
+        return !isSuperAdminActor && !isSelfEdit;
+    }
+
+    private static string? GetManagerRoleChangeValidationError(UserRole currentRole, UserRole requestedRole, bool isSelfEdit)
+    {
+        if (isSelfEdit)
+            return "Не можна змінити власну роль цим запитом.";
+
+        if (requestedRole == UserRole.SuperAdmin)
+            return "Роль SuperAdmin призначається лише через передачу прав.";
+
+        if (currentRole != UserRole.Manager || requestedRole != UserRole.Driver)
+            return "Дозволено лише зниження менеджера до водія.";
+
+        return null;
+    }
+
+    private static void ApplyManagerToDriverRoleChange(UserProfile profile, UserWhitelist whitelistEntry)
+    {
+        whitelistEntry.Role = UserRole.Driver;
+        profile.Role = UserRole.Driver;
+        profile.UserStatus = UserStatus.Offline;
+    }
+
+    private static string? NormalizeRequiredName(string name)
+    {
+        var normalizedName = name.Trim();
+        return normalizedName.Length == 0 ? null : normalizedName;
+    }
+
+    private async Task<(string? normalizedPhone, IActionResult? errorResult)> ValidatePhoneForUpdateAsync(
+        string phoneNumber,
+        string currentPhoneNumber,
+        int currentUserId)
+    {
+        var normalizedPhone = PhoneNumberValidation.Normalize(phoneNumber);
+        if (normalizedPhone is null)
+        {
+            return (null, BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage }));
+        }
+
+        if (normalizedPhone != currentPhoneNumber
+            && await PhoneNumberValidation.IsPhoneTakenAsync(_context, normalizedPhone, currentUserId))
+        {
+            return (null, BadRequest(new
+            {
+                message = PhoneNumberValidation.DuplicateMessage,
+                code = PhoneNumberValidation.PhoneTakenCode
+            }));
+        }
+
+        return (normalizedPhone, null);
     }
 
     private int? GetCurrentUserId()

@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Backend.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
@@ -14,6 +13,8 @@ public class VehicleCatalogController : ControllerBase
 {
     private const string VpicBaseUrl = "https://vpic.nhtsa.dot.gov/api/vehicles";
     private const int SuggestionLimit = 12;
+    private static readonly TimeSpan MakesCacheDuration = TimeSpan.FromHours(24);
+    private static readonly TimeSpan ModelsCacheDuration = TimeSpan.FromHours(12);
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IMemoryCache _cache;
@@ -27,12 +28,12 @@ public class VehicleCatalogController : ControllerBase
     [HttpGet("makes")]
     public async Task<ActionResult<List<string>>> GetMakes([FromQuery] string? query, CancellationToken cancellationToken)
     {
-        var trimmed = (query ?? string.Empty).Trim();
-        if (trimmed.Length < 2)
+        var trimmedQuery = (query ?? string.Empty).Trim();
+        if (trimmedQuery.Length < 2)
             return Ok(new List<string>());
 
         var makes = await GetCarMakesAsync(cancellationToken);
-        return Ok(FilterSuggestions(makes, trimmed));
+        return Ok(FilterSuggestions(makes, trimmedQuery));
     }
 
     [HttpGet("models")]
@@ -41,95 +42,104 @@ public class VehicleCatalogController : ControllerBase
         [FromQuery] string? query,
         CancellationToken cancellationToken)
     {
-        var makeTrimmed = (make ?? string.Empty).Trim();
-        var queryTrimmed = (query ?? string.Empty).Trim();
+        var trimmedMake = (make ?? string.Empty).Trim();
+        var trimmedQuery = (query ?? string.Empty).Trim();
 
-        if (makeTrimmed.Length < 1 || queryTrimmed.Length < 2)
+        if (trimmedMake.Length < 1 || trimmedQuery.Length < 2)
             return Ok(new List<string>());
 
-        var models = await GetModelsByMakeAsync(makeTrimmed, cancellationToken);
-        return Ok(FilterSuggestions(models, queryTrimmed));
+        var models = await GetModelsByMakeAsync(trimmedMake, cancellationToken);
+        return Ok(FilterSuggestions(models, trimmedQuery));
     }
 
     private async Task<List<string>> GetCarMakesAsync(CancellationToken cancellationToken)
     {
         const string cacheKey = "vpic:makes:car";
-        if (_cache.TryGetValue(cacheKey, out List<string>? cached) && cached is not null)
-            return cached;
+        return await GetOrCreateCachedListAsync(
+            cacheKey,
+            MakesCacheDuration,
+            async () =>
+            {
+                var payload = await FetchVpicAsync<VpicMakeRow>(
+                    $"{VpicBaseUrl}/GetMakesForVehicleType/car?format=json",
+                    cancellationToken);
 
-        var client = _httpClientFactory.CreateClient();
-        var response = await client.GetAsync(
-            $"{VpicBaseUrl}/GetMakesForVehicleType/car?format=json",
-            cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var payload = await JsonSerializer.DeserializeAsync<VpicResponse<VpicMakeRow>>(
-            stream,
-            cancellationToken: cancellationToken);
-
-        var makes = payload?.Results?
-            .Select(r => r.MakeName?.Trim())
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => name!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-            .ToList()
-            ?? [];
-
-        _cache.Set(cacheKey, makes, TimeSpan.FromHours(24));
-        return makes;
+                return payload?.Results?
+                    .Select(row => row.MakeName?.Trim())
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Select(name => name!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                    .ToList()
+                    ?? [];
+            });
     }
 
     private async Task<List<string>> GetModelsByMakeAsync(string make, CancellationToken cancellationToken)
     {
         var cacheKey = $"vpic:models:{make.ToLowerInvariant()}";
-        if (_cache.TryGetValue(cacheKey, out List<string>? cached) && cached is not null)
-            return cached;
+        return await GetOrCreateCachedListAsync(
+            cacheKey,
+            ModelsCacheDuration,
+            async () =>
+            {
+                var encodedMake = Uri.EscapeDataString(make);
+                var payload = await FetchVpicAsync<VpicModelRow>(
+                    $"{VpicBaseUrl}/GetModelsForMake/{encodedMake}?format=json",
+                    cancellationToken);
 
-        var client = _httpClientFactory.CreateClient();
-        var encodedMake = Uri.EscapeDataString(make);
-        var response = await client.GetAsync(
-            $"{VpicBaseUrl}/GetModelsForMake/{encodedMake}?format=json",
-            cancellationToken);
+                return payload?.Results?
+                    .Select(row => row.ModelName?.Trim())
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Select(name => name!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                    .ToList()
+                    ?? [];
+            });
+    }
+
+    private async Task<List<string>> GetOrCreateCachedListAsync(
+        string cacheKey,
+        TimeSpan cacheDuration,
+        Func<Task<List<string>>> factory)
+    {
+        if (_cache.TryGetValue(cacheKey, out List<string>? cachedList) && cachedList is not null)
+            return cachedList;
+
+        var loadedList = await factory();
+        _cache.Set(cacheKey, loadedList, cacheDuration);
+        return loadedList;
+    }
+
+    private async Task<VpicResponse<T>?> FetchVpicAsync<T>(string url, CancellationToken cancellationToken)
+    {
+        var httpClient = _httpClientFactory.CreateClient();
+        var response = await httpClient.GetAsync(url, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var payload = await JsonSerializer.DeserializeAsync<VpicResponse<VpicModelRow>>(
-            stream,
-            cancellationToken: cancellationToken);
-
-        var models = payload?.Results?
-            .Select(r => r.ModelName?.Trim())
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => name!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-            .ToList()
-            ?? [];
-
-        _cache.Set(cacheKey, models, TimeSpan.FromHours(12));
-        return models;
+        return await JsonSerializer.DeserializeAsync<VpicResponse<T>>(stream, cancellationToken: cancellationToken);
     }
 
     private static List<string> FilterSuggestions(IEnumerable<string> source, string query)
     {
-        var starts = source
+        var startsWithQuery = source
             .Where(name => name.StartsWith(query, StringComparison.OrdinalIgnoreCase))
             .Take(SuggestionLimit)
             .ToList();
 
-        if (starts.Count >= SuggestionLimit)
-            return starts;
+        if (startsWithQuery.Count >= SuggestionLimit)
+            return startsWithQuery;
 
-        var rest = source
+        var containsQuery = source
             .Where(name =>
                 !name.StartsWith(query, StringComparison.OrdinalIgnoreCase)
                 && name.Contains(query, StringComparison.OrdinalIgnoreCase))
-            .Take(SuggestionLimit - starts.Count);
+            .Take(SuggestionLimit - startsWithQuery.Count);
 
-        starts.AddRange(rest);
-        return starts;
+        startsWithQuery.AddRange(containsQuery);
+        return startsWithQuery;
     }
 
     private sealed class VpicResponse<T>
