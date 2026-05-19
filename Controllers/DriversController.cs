@@ -1,9 +1,11 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
 using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -15,44 +17,64 @@ namespace Backend.Controllers;
 public class DriversController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public DriversController(ApplicationDbContext context)
+    public DriversController(ApplicationDbContext context, IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
     public async Task<ActionResult<IEnumerable<DriverListItemDto>>> GetAll()
     {
-        var driverRows = await (from profile in _context.UserProfiles
-                                join whitelist in _context.UserWhitelists
-                                    on profile.UserId equals whitelist.Id
-                                where profile.Role == UserRole.Driver
-                                      && whitelist.Role == UserRole.Driver
-                                      && whitelist.IsActive
-                                      && !string.IsNullOrWhiteSpace(profile.Name)
-                                      && profile.Name != profile.PhoneNumber
-                                join ride in _context.Rides.Where(r => r.Status == RideStatus.Completed)
-                                    on profile.Id equals ride.DriverId into ridesGroup
-                                select new DriverListItemDto
-                                {
-                                    Id = profile.Id,
-                                    UserId = profile.UserId,
-                                    PhoneNumber = profile.PhoneNumber,
-                                    Name = profile.Name,
-                                    CarMake = profile.CarMake,
-                                    CarModel = profile.CarModel,
-                                    CarColor = profile.CarColor,
-                                    LicensePlate = profile.LicensePlate,
-                                    Role = profile.Role,
-                                    UserStatus = profile.UserStatus,
-                                    TripCount = ridesGroup.Count(),
-                                    AverageRating = ridesGroup
-                                        .Where(r => r.Rating.HasValue)
-                                        .Select(r => r.Rating)
-                                        .Average()
-                                })
+        var rawRows = await (from profile in _context.UserProfiles
+                             join whitelist in _context.UserWhitelists
+                                 on profile.UserId equals whitelist.Id
+                             where profile.Role == UserRole.Driver
+                                   && whitelist.Role == UserRole.Driver
+                                   && whitelist.IsActive
+                                   && !string.IsNullOrWhiteSpace(profile.Name)
+                                   && profile.Name != profile.PhoneNumber
+                             join ride in _context.Rides.Where(r => r.Status == RideStatus.Completed)
+                                 on profile.Id equals ride.DriverId into ridesGroup
+                             select new
+                             {
+                                 profile.Id,
+                                 profile.UserId,
+                                 profile.PhoneNumber,
+                                 profile.Name,
+                                 profile.CarMake,
+                                 profile.CarModel,
+                                 profile.CarColor,
+                                 profile.LicensePlate,
+                                 profile.Role,
+                                 profile.UserStatus,
+                                 TripCount = ridesGroup.Count(),
+                                 AverageRatingRaw = ridesGroup
+                                     .Where(r => r.Rating.HasValue)
+                                     .Select(r => r.Rating)
+                                     .Average()
+                             })
             .ToListAsync();
+
+        var driverRows = rawRows.Select(row => new DriverListItemDto
+        {
+            Id = row.Id,
+            UserId = row.UserId,
+            PhoneNumber = row.PhoneNumber,
+            Name = row.Name,
+            CarMake = row.CarMake,
+            CarModel = row.CarModel,
+            CarColor = row.CarColor,
+            LicensePlate = row.LicensePlate,
+            Role = row.Role,
+            UserStatus = row.UserStatus,
+            TripCount = row.TripCount,
+            AverageRating = row.AverageRatingRaw.HasValue
+                ? decimal.Round(row.AverageRatingRaw.Value, 2, MidpointRounding.AwayFromZero)
+                : null
+        }).ToList();
 
         return driverRows;
     }
@@ -77,9 +99,9 @@ public class DriversController : ControllerBase
     public async Task<ActionResult<UserProfile>> Create(UserProfile driver)
     {
         driver.Role = UserRole.Driver;
-        var phone = NormalizePhone(driver.PhoneNumber);
+        var phone = PhoneNumberValidation.Normalize(driver.PhoneNumber);
         if (phone is null)
-            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
 
         var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.PhoneNumber == phone);
@@ -109,7 +131,13 @@ public class DriversController : ControllerBase
         }
 
         if (await _context.UserProfiles.AnyAsync(p => p.UserId == whitelistEntry.Id))
-            return BadRequest(new { message = "Профіль для цього номера вже існує." });
+        {
+            return BadRequest(new
+            {
+                message = PhoneNumberValidation.DuplicateMessage,
+                code = PhoneNumberValidation.PhoneTakenCode
+            });
+        }
 
         if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarMake))
             return BadRequest(new { message = "Марка авто: лише латинські літери, цифри, пробіл та дефіс." });
@@ -120,11 +148,12 @@ public class DriversController : ControllerBase
 
         driver.UserId = whitelistEntry.Id;
         driver.PhoneNumber = whitelistEntry.PhoneNumber;
-        // Temporary rule: newly created drivers start as Online.
-        driver.UserStatus = UserStatus.Online;
+        // Новий профіль стартує Offline, далі статус керується PresenceHub/налаштуваннями.
+        driver.UserStatus = UserStatus.Offline;
 
         _context.UserProfiles.Add(driver);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("drivers", "create", driver.UserId);
         return CreatedAtAction(nameof(GetById), new { id = driver.Id }, driver);
     }
 
@@ -138,9 +167,9 @@ public class DriversController : ControllerBase
         if (existingDriver is null || existingDriver.Role != UserRole.Driver)
             return NotFound();
 
-        var normalizedPhone = NormalizePhone(driver.PhoneNumber);
+        var normalizedPhone = PhoneNumberValidation.Normalize(driver.PhoneNumber);
         if (normalizedPhone is null)
-            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
 
         var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.Id == existingDriver.UserId);
@@ -174,7 +203,13 @@ public class DriversController : ControllerBase
             var phoneTaken = await _context.UserWhitelists
                 .AnyAsync(w => w.PhoneNumber == normalizedPhone && w.Id != whitelistEntry.Id);
             if (phoneTaken)
-                return BadRequest(new { message = "Номер телефону вже зайнятий." });
+            {
+                return BadRequest(new
+                {
+                    message = PhoneNumberValidation.DuplicateMessage,
+                    code = PhoneNumberValidation.PhoneTakenCode
+                });
+            }
         }
 
         if (!CarFieldValidation.IsValidCarBrandOrModel(driver.CarMake))
@@ -205,6 +240,7 @@ public class DriversController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("drivers", "update", existingDriver.UserId);
         return NoContent();
     }
 
@@ -228,27 +264,17 @@ public class DriversController : ControllerBase
             _context.UserWhitelists.Remove(whitelist);
 
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("drivers", "delete", driver.UserId);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private UserRole GetActorRole()
     {
         var role = User.FindFirstValue(ClaimTypes.Role);
         return Enum.TryParse<UserRole>(role, out var parsed) ? parsed : UserRole.Driver;
-    }
-
-    private static string? NormalizePhone(string phone)
-    {
-        if (string.IsNullOrWhiteSpace(phone))
-            return null;
-
-        var normalized = phone.Trim();
-        if (!normalized.StartsWith("+380"))
-            return null;
-
-        return normalized.Length == 13 && normalized.Skip(1).All(char.IsDigit)
-            ? normalized
-            : null;
     }
 
 }

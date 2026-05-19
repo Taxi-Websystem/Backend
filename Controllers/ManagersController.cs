@@ -1,8 +1,12 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Services;
+using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -14,32 +18,75 @@ namespace Backend.Controllers;
 public class ManagersController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IUserSettingsService _userSettingsService;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public ManagersController(ApplicationDbContext context)
+    public ManagersController(
+        ApplicationDbContext context,
+        IUserSettingsService userSettingsService,
+        IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _userSettingsService = userSettingsService;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
     public async Task<ActionResult<IEnumerable<ManagerListItemDto>>> GetAll()
     {
-        var managers = await (from whitelist in _context.UserWhitelists
-                              where whitelist.Role == UserRole.Manager || whitelist.Role == UserRole.SuperAdmin
-                              join profile in _context.UserProfiles on whitelist.Id equals profile.UserId
-                              where !string.IsNullOrWhiteSpace(profile.Name)
-                                    && profile.Name != profile.PhoneNumber
-                              select new ManagerListItemDto
-                              {
-                                  Id = profile.Id,
-                                  UserId = whitelist.Id,
-                                  PhoneNumber = whitelist.PhoneNumber,
-                                  Name = profile.Name,
-                                  Role = whitelist.Role,
-                                  Status = whitelist.IsActive ? UserOnlineStatus.Online : UserOnlineStatus.Offline
-                              })
+        var managerRows = await (from whitelist in _context.UserWhitelists
+                                 where whitelist.Role == UserRole.Manager || whitelist.Role == UserRole.SuperAdmin
+                                 join profile in _context.UserProfiles on whitelist.Id equals profile.UserId
+                                 where !string.IsNullOrWhiteSpace(profile.Name)
+                                       && profile.Name != profile.PhoneNumber
+                                 select new { whitelist, profile })
+            .ToListAsync();
+
+        var hasChanges = false;
+        foreach (var row in managerRows)
+        {
+            var settings = await _userSettingsService.GetOrCreateAsync(row.profile.UserId);
+            if (!settings.IsAutoStatusEnabled)
+            {
+                // Для Manager/SuperAdmin автостатус завжди активний.
+                settings.IsAutoStatusEnabled = true;
+                hasChanges = true;
+            }
+
+            if (row.profile.UserStatus == UserStatus.InRide)
+            {
+                continue;
+            }
+
+            var shouldBeOnline = PresenceHub.HasActiveConnections(row.profile.UserId);
+            var targetStatus = shouldBeOnline ? UserStatus.Online : UserStatus.Offline;
+            if (row.profile.UserStatus != targetStatus)
+            {
+                row.profile.UserStatus = targetStatus;
+                hasChanges = true;
+            }
+        }
+
+        if (hasChanges)
+        {
+            await _context.SaveChangesAsync();
+        }
+
+        var managers = managerRows
+            .Select(row => new ManagerListItemDto
+            {
+                Id = row.profile.Id,
+                UserId = row.whitelist.Id,
+                PhoneNumber = row.whitelist.PhoneNumber,
+                Name = row.profile.Name,
+                Role = row.whitelist.Role,
+                Status = row.profile.UserStatus == UserStatus.Online
+                    ? UserOnlineStatus.Online
+                    : UserOnlineStatus.Offline
+            })
             .OrderBy(item => item.Role)
             .ThenBy(item => item.UserId)
-            .ToListAsync();
+            .ToList();
 
         return managers;
     }
@@ -51,9 +98,9 @@ public class ManagersController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(new { message = "Ім'я обов'язкове." });
 
-        var phone = NormalizePhone(request.PhoneNumber);
+        var phone = PhoneNumberValidation.Normalize(request.PhoneNumber);
         if (phone is null)
-            return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
 
         var whitelistEntry = await _context.UserWhitelists
             .FirstOrDefaultAsync(w => w.PhoneNumber == phone);
@@ -84,7 +131,13 @@ public class ManagersController : ControllerBase
         }
 
         if (await _context.UserProfiles.AnyAsync(p => p.UserId == whitelistEntry.Id))
-            return BadRequest(new { message = "Профіль для цього номера вже існує." });
+        {
+            return BadRequest(new
+            {
+                message = PhoneNumberValidation.DuplicateMessage,
+                code = PhoneNumberValidation.PhoneTakenCode
+            });
+        }
 
         var manager = new UserProfile
         {
@@ -96,6 +149,7 @@ public class ManagersController : ControllerBase
 
         _context.UserProfiles.Add(manager);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("managers", "create", manager.UserId);
 
         return CreatedAtAction(nameof(GetById), new { id = manager.Id }, manager);
     }
@@ -172,9 +226,19 @@ public class ManagersController : ControllerBase
 
         if (isSuperAdminActor && !string.IsNullOrWhiteSpace(request.PhoneNumber))
         {
-            var normalizedPhone = NormalizePhone(request.PhoneNumber);
+            var normalizedPhone = PhoneNumberValidation.Normalize(request.PhoneNumber);
             if (normalizedPhone is null)
-                return BadRequest(new { message = "Некоректний формат телефону. Використовуйте +380XXXXXXXXX." });
+                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
+
+            if (normalizedPhone != whitelistEntry.PhoneNumber
+                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, normalizedPhone, whitelistEntry.Id))
+            {
+                return BadRequest(new
+                {
+                    message = PhoneNumberValidation.DuplicateMessage,
+                    code = PhoneNumberValidation.PhoneTakenCode
+                });
+            }
 
             whitelistEntry.PhoneNumber = normalizedPhone;
             existing.PhoneNumber = normalizedPhone;
@@ -193,6 +257,7 @@ public class ManagersController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("managers", "update", existing.UserId);
         return NoContent();
     }
 
@@ -220,8 +285,12 @@ public class ManagersController : ControllerBase
             _context.UserWhitelists.Remove(whitelist);
 
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("managers", "delete", profile.UserId);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private Task<bool> IsActiveWhitelistEntry(int userId)
     {
@@ -237,19 +306,6 @@ public class ManagersController : ControllerBase
         return parsedId;
     }
 
-    private static string? NormalizePhone(string phone)
-    {
-        if (string.IsNullOrWhiteSpace(phone))
-            return null;
-
-        var normalized = phone.Trim();
-        if (!normalized.StartsWith("+380"))
-            return null;
-
-        return normalized.Length == 13 && normalized.Skip(1).All(char.IsDigit)
-            ? normalized
-            : null;
-    }
 }
 
 public class ManagerListItemDto

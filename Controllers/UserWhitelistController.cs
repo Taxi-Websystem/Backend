@@ -1,8 +1,11 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -14,10 +17,12 @@ namespace Backend.Controllers;
 public class UserWhitelistController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
-    public UserWhitelistController(ApplicationDbContext context)
+    public UserWhitelistController(ApplicationDbContext context, IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
+        _presenceHub = presenceHub;
     }
 
     [HttpGet]
@@ -41,9 +46,18 @@ public class UserWhitelistController : ControllerBase
         if (!CanManageWhitelistRole(currentRole, entry.Role))
             return Forbid();
 
+        var phone = PhoneNumberValidation.Normalize(entry.PhoneNumber);
+        if (phone is null)
+            return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
+
+        if (await PhoneNumberValidation.IsPhoneTakenAsync(_context, phone))
+            return BadRequest(new { message = PhoneNumberValidation.DuplicateMessage, code = PhoneNumberValidation.PhoneTakenCode });
+
+        entry.PhoneNumber = phone;
         entry.CreatedAt = DateTime.UtcNow;
         _context.UserWhitelists.Add(entry);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("whitelist", "create", entry.Id);
         return CreatedAtAction(nameof(GetById), new { id = entry.Id }, entry);
     }
 
@@ -67,7 +81,21 @@ public class UserWhitelistController : ControllerBase
             if (entry.Role != UserRole.SuperAdmin)
                 return BadRequest(new { message = "Змінити власну роль можна лише через налаштування передачі прав SuperAdmin." });
 
-            existing.PhoneNumber = entry.PhoneNumber;
+            var phone = PhoneNumberValidation.Normalize(entry.PhoneNumber);
+            if (phone is null)
+                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
+
+            if (phone != existing.PhoneNumber
+                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, phone, existing.Id))
+            {
+                return BadRequest(new
+                {
+                    message = PhoneNumberValidation.DuplicateMessage,
+                    code = PhoneNumberValidation.PhoneTakenCode
+                });
+            }
+
+            existing.PhoneNumber = phone;
             existing.IsActive = entry.IsActive;
         }
         else
@@ -81,7 +109,21 @@ public class UserWhitelistController : ControllerBase
             if (!CanManageWhitelistRole(currentRole, entry.Role))
                 return Forbid();
 
-            existing.PhoneNumber = entry.PhoneNumber;
+            var phone = PhoneNumberValidation.Normalize(entry.PhoneNumber);
+            if (phone is null)
+                return BadRequest(new { message = PhoneNumberValidation.InvalidFormatMessage });
+
+            if (phone != existing.PhoneNumber
+                && await PhoneNumberValidation.IsPhoneTakenAsync(_context, phone, existing.Id))
+            {
+                return BadRequest(new
+                {
+                    message = PhoneNumberValidation.DuplicateMessage,
+                    code = PhoneNumberValidation.PhoneTakenCode
+                });
+            }
+
+            existing.PhoneNumber = phone;
             existing.Role = entry.Role;
             existing.IsActive = entry.IsActive;
         }
@@ -92,7 +134,7 @@ public class UserWhitelistController : ControllerBase
         if (linkedProfile is not null)
         {
             linkedProfile.Role = entry.Role;
-            linkedProfile.PhoneNumber = entry.PhoneNumber;
+            linkedProfile.PhoneNumber = existing.PhoneNumber;
             if (entry.Role == UserRole.Driver)
                 linkedProfile.UserStatus = UserStatus.Offline;
         }
@@ -108,6 +150,7 @@ public class UserWhitelistController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("whitelist", "update", existing.Id);
         return NoContent();
     }
 
@@ -135,8 +178,12 @@ public class UserWhitelistController : ControllerBase
 
         _context.UserWhitelists.Remove(entry);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("whitelist", "delete", entry.Id);
         return NoContent();
     }
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private UserRole GetCurrentRole()
     {

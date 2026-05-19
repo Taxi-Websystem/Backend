@@ -4,6 +4,7 @@ using Backend.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace Backend.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260514105713_AddFinanceSystemSettingsAndRidePricing")]
+    partial class AddFinanceSystemSettingsAndRidePricing
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -29,9 +32,6 @@ namespace Backend.Migrations
                         .HasColumnType("int");
 
                     MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<DateTime?>("AcceptedAt")
-                        .HasColumnType("datetime(6)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime(6)");
@@ -55,14 +55,6 @@ namespace Backend.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("varchar(300)");
 
-                    b.Property<decimal?>("FromLatitude")
-                        .HasPrecision(9, 6)
-                        .HasColumnType("decimal(9,6)");
-
-                    b.Property<decimal?>("FromLongitude")
-                        .HasPrecision(9, 6)
-                        .HasColumnType("decimal(9,6)");
-
                     b.Property<decimal>("Price")
                         .HasPrecision(12, 2)
                         .HasColumnType("decimal(12,2)");
@@ -70,6 +62,10 @@ namespace Backend.Migrations
                     b.Property<decimal?>("Rating")
                         .HasPrecision(5, 2)
                         .HasColumnType("decimal(5,2)");
+
+                    b.Property<string>("Route")
+                        .IsRequired()
+                        .HasColumnType("longtext");
 
                     b.Property<DateTime?>("StartTime")
                         .HasColumnType("datetime(6)");
@@ -82,48 +78,11 @@ namespace Backend.Migrations
                         .HasMaxLength(300)
                         .HasColumnType("varchar(300)");
 
-                    b.Property<decimal?>("ToLatitude")
-                        .HasPrecision(9, 6)
-                        .HasColumnType("decimal(9,6)");
-
-                    b.Property<decimal?>("ToLongitude")
-                        .HasPrecision(9, 6)
-                        .HasColumnType("decimal(9,6)");
-
                     b.HasKey("Id");
 
                     b.HasIndex("DriverId");
 
                     b.ToTable("Rides");
-                });
-
-            modelBuilder.Entity("Backend.Models.RideRoutePoint", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("int");
-
-                    MySqlPropertyBuilderExtensions.UseMySqlIdentityColumn(b.Property<int>("Id"));
-
-                    b.Property<decimal>("Latitude")
-                        .HasPrecision(9, 6)
-                        .HasColumnType("decimal(9,6)");
-
-                    b.Property<decimal>("Longitude")
-                        .HasPrecision(9, 6)
-                        .HasColumnType("decimal(9,6)");
-
-                    b.Property<DateTime>("RecordedAt")
-                        .HasColumnType("datetime(6)");
-
-                    b.Property<int>("RideId")
-                        .HasColumnType("int");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RideId", "RecordedAt");
-
-                    b.ToTable("RideRoutePoints");
                 });
 
             modelBuilder.Entity("Backend.Models.SystemSettings", b =>
@@ -141,9 +100,6 @@ namespace Backend.Migrations
                     b.Property<decimal>("CostPerKm")
                         .HasPrecision(12, 2)
                         .HasColumnType("decimal(12,2)");
-
-                    b.Property<bool>("IsRouteOptimizationEnabled")
-                        .HasColumnType("tinyint(1)");
 
                     b.Property<decimal>("PlatformFeePercentage")
                         .HasPrecision(6, 4)
@@ -163,7 +119,6 @@ namespace Backend.Migrations
                             Id = 1,
                             BaseFare = 50m,
                             CostPerKm = 15m,
-                            IsRouteOptimizationEnabled = false,
                             PlatformFeePercentage = 0.10m,
                             PlatformFixedFee = 10m
                         });
@@ -222,13 +177,7 @@ namespace Backend.Migrations
                     b.Property<int>("UserId")
                         .HasColumnType("int");
 
-                    b.Property<bool>("IsAutoAcceptOrdersEnabled")
-                        .HasColumnType("tinyint(1)");
-
                     b.Property<bool>("IsAutoStatusEnabled")
-                        .HasColumnType("tinyint(1)");
-
-                    b.Property<bool>("IsRouteOptimizationEnabled")
                         .HasColumnType("tinyint(1)");
 
                     b.HasKey("UserId");
@@ -283,17 +232,6 @@ namespace Backend.Migrations
                     b.Navigation("Driver");
                 });
 
-            modelBuilder.Entity("Backend.Models.RideRoutePoint", b =>
-                {
-                    b.HasOne("Backend.Models.Ride", "Ride")
-                        .WithMany("RoutePoints")
-                        .HasForeignKey("RideId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Ride");
-                });
-
             modelBuilder.Entity("Backend.Models.UserSettings", b =>
                 {
                     b.HasOne("Backend.Models.UserWhitelist", "UserWhitelist")
@@ -303,11 +241,6 @@ namespace Backend.Migrations
                         .IsRequired();
 
                     b.Navigation("UserWhitelist");
-                });
-
-            modelBuilder.Entity("Backend.Models.Ride", b =>
-                {
-                    b.Navigation("RoutePoints");
                 });
 
             modelBuilder.Entity("Backend.Models.UserProfile", b =>

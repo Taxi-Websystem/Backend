@@ -3,6 +3,7 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
 using Backend.Validation;
@@ -10,6 +11,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Backend.Controllers;
@@ -24,17 +26,20 @@ public class AuthController : ControllerBase
     private readonly IMemoryCache _cache;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
+    private readonly IHubContext<PresenceHub> _presenceHub;
 
     public AuthController(
         ApplicationDbContext context,
         IMemoryCache cache,
         IConfiguration configuration,
-        ILogger<AuthController> logger)
+        ILogger<AuthController> logger,
+        IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
         _cache = cache;
         _configuration = configuration;
         _logger = logger;
+        _presenceHub = presenceHub;
     }
 
     [HttpPost("send-code")]
@@ -244,6 +249,14 @@ public class AuthController : ControllerBase
         }
 
         await _context.SaveChangesAsync();
+
+        var entity = userRole == UserRole.Driver ? "drivers" : "managers";
+        await _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new
+        {
+            entity,
+            action = "update",
+            userId = whitelistId
+        });
 
         return NoContent();
     }

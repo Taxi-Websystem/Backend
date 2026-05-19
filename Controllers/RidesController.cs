@@ -1,8 +1,11 @@
 using Backend.Data;
+using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
+using Backend.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
@@ -14,10 +17,17 @@ namespace Backend.Controllers;
 public class RidesController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly IHubContext<PresenceHub> _presenceHub;
+    private readonly IRidePricingService _ridePricing;
 
-    public RidesController(ApplicationDbContext context)
+    public RidesController(
+        ApplicationDbContext context,
+        IHubContext<PresenceHub> presenceHub,
+        IRidePricingService ridePricing)
     {
         _context = context;
+        _presenceHub = presenceHub;
+        _ridePricing = ridePricing;
     }
 
     [HttpGet]
@@ -27,20 +37,7 @@ public class RidesController : ControllerBase
             .AsNoTracking()
             .Include(r => r.Driver)
             .OrderByDescending(r => r.CreatedAt)
-            .Select(r => new RideListItemDto
-            {
-                Id = r.Id,
-                DriverId = r.DriverId,
-                DriverName = r.Driver != null ? r.Driver.Name : null,
-                DriverPhoneNumber = r.Driver != null ? r.Driver.PhoneNumber : null,
-                Status = r.Status,
-                Rating = r.Rating,
-                FromAddress = r.FromAddress,
-                ToAddress = r.ToAddress,
-                StartTime = r.StartTime,
-                EndTime = r.EndTime,
-                CreatedAt = r.CreatedAt
-            })
+            .Select(r => MapToListItem(r))
             .ToListAsync();
 
         return rides;
@@ -53,23 +50,41 @@ public class RidesController : ControllerBase
             .AsNoTracking()
             .Include(r => r.Driver)
             .Where(r => r.Id == id)
-            .Select(r => new RideListItemDto
-            {
-                Id = r.Id,
-                DriverId = r.DriverId,
-                DriverName = r.Driver != null ? r.Driver.Name : null,
-                DriverPhoneNumber = r.Driver != null ? r.Driver.PhoneNumber : null,
-                Status = r.Status,
-                Rating = r.Rating,
-                FromAddress = r.FromAddress,
-                ToAddress = r.ToAddress,
-                StartTime = r.StartTime,
-                EndTime = r.EndTime,
-                CreatedAt = r.CreatedAt
-            })
             .FirstOrDefaultAsync();
         if (ride is null) return NotFound();
-        return ride;
+        return MapToListItem(ride);
+    }
+
+    [HttpGet("{id}/map")]
+    public async Task<ActionResult<RideMapDto>> GetMap(int id)
+    {
+        var ride = await _context.Rides
+            .AsNoTracking()
+            .Include(r => r.RoutePoints)
+            .Where(r => r.Id == id)
+            .FirstOrDefaultAsync();
+        if (ride is null) return NotFound();
+
+        return new RideMapDto
+        {
+            Id = ride.Id,
+            FromAddress = ride.FromAddress,
+            ToAddress = ride.ToAddress,
+            FromLatitude = ride.FromLatitude,
+            FromLongitude = ride.FromLongitude,
+            ToLatitude = ride.ToLatitude,
+            ToLongitude = ride.ToLongitude,
+            DistanceKm = ride.DistanceKm,
+            RoutePoints = ride.RoutePoints
+                .OrderBy(p => p.RecordedAt)
+                .Select(p => new RoutePointDto
+                {
+                    Latitude = p.Latitude,
+                    Longitude = p.Longitude,
+                    RecordedAt = p.RecordedAt
+                })
+                .ToList()
+        };
     }
 
     [HttpPost]
@@ -80,9 +95,11 @@ public class RidesController : ControllerBase
             dto.Rating = null;
         }
 
-        var validationError = await ValidateRideDriverAndRatingMessageAsync(dto.DriverId, dto.Rating);
+        var validationError = await ValidateRideAsync(dto);
         if (validationError is not null)
             return BadRequest(new { message = validationError });
+
+        var settings = await _ridePricing.GetSettingsAsync();
 
         var ride = new Ride
         {
@@ -91,26 +108,23 @@ public class RidesController : ControllerBase
             Rating = dto.Rating,
             FromAddress = dto.FromAddress.Trim(),
             ToAddress = dto.ToAddress.Trim(),
+            FromLatitude = dto.FromLatitude,
+            FromLongitude = dto.FromLongitude,
+            ToLatitude = dto.ToLatitude,
+            ToLongitude = dto.ToLongitude,
             StartTime = dto.StartTime,
             EndTime = dto.EndTime,
-            CreatedAt = DateTime.UtcNow,
-            Route = []
+            CreatedAt = DateTime.UtcNow
         };
+
+        NormalizeCompletedRideTimestamps(ride);
+
+        _ridePricing.ApplyFinancials(ride, settings, dto.DistanceKm, dto.Status);
 
         _context.Rides.Add(ride);
         await _context.SaveChangesAsync();
-        return CreatedAtAction(nameof(GetById), new { id = ride.Id }, new RideListItemDto
-        {
-            Id = ride.Id,
-            DriverId = ride.DriverId,
-            Status = ride.Status,
-            Rating = ride.Rating,
-            FromAddress = ride.FromAddress,
-            ToAddress = ride.ToAddress,
-            StartTime = ride.StartTime,
-            EndTime = ride.EndTime,
-            CreatedAt = ride.CreatedAt
-        });
+        await BroadcastDashboardDataChanged("rides", "create", ride.DriverId);
+        return CreatedAtAction(nameof(GetById), new { id = ride.Id }, MapToListItem(ride));
     }
 
     [HttpPut("{id}")]
@@ -125,17 +139,27 @@ public class RidesController : ControllerBase
             dto.Rating = ride.Rating;
         }
 
-        var validationError = await ValidateRideDriverAndRatingMessageAsync(dto.DriverId, dto.Rating);
+        var validationError = await ValidateRideAsync(dto);
         if (validationError is not null)
             return BadRequest(new { message = validationError });
+
+        var settings = await _ridePricing.GetSettingsAsync();
 
         ride.DriverId = dto.DriverId;
         ride.Status = dto.Status;
         ride.Rating = dto.Rating;
         ride.FromAddress = dto.FromAddress.Trim();
         ride.ToAddress = dto.ToAddress.Trim();
+        ride.FromLatitude = dto.FromLatitude;
+        ride.FromLongitude = dto.FromLongitude;
+        ride.ToLatitude = dto.ToLatitude;
+        ride.ToLongitude = dto.ToLongitude;
         ride.StartTime = dto.StartTime;
         ride.EndTime = dto.EndTime;
+
+        NormalizeCompletedRideTimestamps(ride);
+
+        _ridePricing.ApplyFinancials(ride, settings, dto.DistanceKm, dto.Status);
 
         try
         {
@@ -148,6 +172,7 @@ public class RidesController : ControllerBase
             throw;
         }
 
+        await BroadcastDashboardDataChanged("rides", "update", ride.DriverId);
         return NoContent();
     }
 
@@ -159,14 +184,64 @@ public class RidesController : ControllerBase
 
         _context.Rides.Remove(ride);
         await _context.SaveChangesAsync();
+        await BroadcastDashboardDataChanged("rides", "delete", ride.DriverId);
         return NoContent();
     }
+
+    private static RideListItemDto MapToListItem(Ride r) => new()
+    {
+        Id = r.Id,
+        DriverId = r.DriverId,
+        DriverName = r.Driver?.Name,
+        DriverPhoneNumber = r.Driver?.PhoneNumber,
+        Status = r.Status,
+        Rating = r.Rating,
+        FromAddress = r.FromAddress,
+        ToAddress = r.ToAddress,
+        FromLatitude = r.FromLatitude,
+        FromLongitude = r.FromLongitude,
+        ToLatitude = r.ToLatitude,
+        ToLongitude = r.ToLongitude,
+        StartTime = r.StartTime,
+        EndTime = r.EndTime,
+        CreatedAt = r.CreatedAt,
+        DistanceKm = r.DistanceKm,
+        Price = r.Price,
+        DriverProfit = r.DriverProfit
+    };
+
+    private Task BroadcastDashboardDataChanged(string entity, string action, int? userId)
+        => _presenceHub.Clients.All.SendAsync("DashboardDataChanged", new { entity, action, userId });
 
     private UserRole GetActorRole()
     {
         var role = User.FindFirstValue(ClaimTypes.Role);
         return Enum.TryParse<UserRole>(role, out var parsed) ? parsed : UserRole.Driver;
     }
+
+    private async Task<string?> ValidateRideAsync(RideUpsertDto dto)
+    {
+        var driverRatingError = await ValidateRideDriverAndRatingMessageAsync(dto.DriverId, dto.Rating);
+        if (driverRatingError is not null)
+            return driverRatingError;
+
+        if (dto.DistanceKm < 0)
+            return "Відстань не може бути від’ємною.";
+
+        if (string.IsNullOrWhiteSpace(dto.FromAddress) || string.IsNullOrWhiteSpace(dto.ToAddress))
+            return "Вкажіть адреси «Звідки» та «Куди».";
+
+        if (!HasValidCoordinates(dto.FromLatitude, dto.FromLongitude)
+            || !HasValidCoordinates(dto.ToLatitude, dto.ToLongitude))
+            return "Оберіть адреси зі списку (потрібні координати).";
+
+        return null;
+    }
+
+    private static bool HasValidCoordinates(decimal? lat, decimal? lng) =>
+        lat.HasValue && lng.HasValue
+        && lat.Value is >= -90 and <= 90
+        && lng.Value is >= -180 and <= 180;
 
     private async Task<string?> ValidateRideDriverAndRatingMessageAsync(int? driverId, decimal? rating)
     {
@@ -181,5 +256,17 @@ public class RidesController : ControllerBase
             return "Оцінка поїздки має бути від 1 до 5.";
 
         return null;
+    }
+
+    private static void NormalizeCompletedRideTimestamps(Ride ride)
+    {
+        if (ride.Status != RideStatus.Completed)
+            return;
+
+        if (!ride.EndTime.HasValue)
+            ride.EndTime = DateTime.UtcNow;
+
+        if (!ride.StartTime.HasValue)
+            ride.StartTime = ride.EndTime!.Value;
     }
 }
