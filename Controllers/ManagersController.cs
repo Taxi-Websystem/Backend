@@ -4,7 +4,6 @@ using Backend.Data;
 using Backend.Hubs;
 using Backend.Models;
 using Backend.Models.Enums;
-using Backend.Services;
 using Backend.Validation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -19,16 +18,13 @@ namespace Backend.Controllers;
 public class ManagersController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
-    private readonly IUserSettingsService _userSettingsService;
     private readonly IHubContext<PresenceHub> _presenceHub;
 
     public ManagersController(
         ApplicationDbContext context,
-        IUserSettingsService userSettingsService,
         IHubContext<PresenceHub> presenceHub)
     {
         _context = context;
-        _userSettingsService = userSettingsService;
         _presenceHub = presenceHub;
     }
 
@@ -43,11 +39,26 @@ public class ManagersController : ControllerBase
                                  select new { whitelist, profile })
             .ToListAsync();
 
+        var managerUserIds = managerRows.Select(row => row.profile.UserId).ToList();
+        var settingsByUserId = await _context.UserSettings
+            .Where(settings => managerUserIds.Contains(settings.UserId))
+            .ToDictionaryAsync(settings => settings.UserId);
+
         var hasChanges = false;
         foreach (var row in managerRows)
         {
-            var settings = await _userSettingsService.GetOrCreateAsync(row.profile.UserId);
-            if (!settings.IsAutoStatusEnabled)
+            if (!settingsByUserId.TryGetValue(row.profile.UserId, out var settings))
+            {
+                settings = new UserSettings
+                {
+                    UserId = row.profile.UserId,
+                    IsAutoStatusEnabled = true
+                };
+                _context.UserSettings.Add(settings);
+                settingsByUserId[row.profile.UserId] = settings;
+                hasChanges = true;
+            }
+            else if (!settings.IsAutoStatusEnabled)
             {
                 settings.IsAutoStatusEnabled = true;
                 hasChanges = true;
